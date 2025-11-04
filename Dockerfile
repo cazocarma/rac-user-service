@@ -1,11 +1,14 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
-COPY . .
+COPY go.mod go.sum ./
 RUN go mod download
-RUN CGO_ENABLED=0 go build -o server ./cmd/server
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 FROM alpine:3.19
 WORKDIR /app
 COPY --from=builder /app/server /app/server
+ENV PORT=8080
+ENV SERVICE_NAME=rac-user-service
 EXPOSE 8080
 ENTRYPOINT ["/app/server"]
