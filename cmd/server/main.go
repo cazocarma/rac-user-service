@@ -1,37 +1,43 @@
 package main
 
 import (
-	"fmt"
+	"database/sql"
 	"log"
-	"net/http"
-	"os"
+	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/cazocarma/rac-user-service/internal/config"
+	httpapi "github.com/cazocarma/rac-user-service/internal/http"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	service := os.Getenv("SERVICE_NAME")
-	if service == "" {
-		service = "unknown-service"
+	cfg := config.Get()
+
+	var db *sql.DB
+	var err error
+
+	// Retry: espera a Postgres con backoff (hasta ~60s)
+	for i := 0; i < 12; i++ {
+		db, err = sql.Open("postgres", cfg.DatabaseURL)
+		if err == nil {
+			if pingErr := db.Ping(); pingErr == nil {
+				break
+			} else {
+				err = pingErr
+			}
+		}
+		wait := time.Duration(5*(i+1)) * time.Second
+		log.Printf("[user-svc] waiting for postgres: %v (retry in %s)", err, wait)
+		time.Sleep(wait)
+	}
+	if err != nil {
+		log.Fatalf("[user-svc] cannot reach postgres: %v", err)
 	}
 
-	r := gin.Default()
-
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"service": service,
-		})
-	})
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	addr := fmt.Sprintf(":%s", port)
-	log.Printf("✅ %s listening on %s", service, addr)
-	if err := r.Run(addr); err != nil {
-		log.Fatalf("❌ %s failed: %v", service, err)
+	srv := httpapi.New(db)
+	addr := ":" + cfg.Port
+	log.Printf("user service listening on %s", addr)
+	if err := srv.Router().Run(addr); err != nil {
+		log.Fatal(err)
 	}
 }
