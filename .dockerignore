@@ -1,0 +1,17 @@
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+README.md
+.env
+*.local
+*.log
+*.tmp
+server
+*.exe
+*.out
+*.test
+vendor/
+migrations/

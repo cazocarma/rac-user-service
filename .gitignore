@@ -1,0 +1,16 @@
+/server
+*.exe
+*.out
+*.test
+/vendor/
+*.log
+*.tmp
+*.swp
+.env
+.env.*
+*.local
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
