@@ -34,7 +34,7 @@ func main() {
 		log.Fatalf("[user-svc] cannot reach postgres: %v", err)
 	}
 
-	srv := httpapi.New(db)
+    srv := httpapi.New(db, cfg)
 	addr := ":" + cfg.Port
 	log.Printf("user service listening on %s", addr)
 	if err := srv.Router().Run(addr); err != nil {

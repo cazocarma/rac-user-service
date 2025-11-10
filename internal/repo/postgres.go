@@ -1,16 +1,70 @@
 package repo
 
 import (
-	"context"
-	"database/sql"
-	"strings"
+    "context"
+    "database/sql"
+    "fmt"
+    "strings"
 
-	"github.com/lib/pq"
+    "github.com/lib/pq"
 )
 
 type Repo struct{ DB *sql.DB }
 
 func New(db *sql.DB) *Repo { return &Repo{DB: db} }
+
+type ProfileInput struct {
+    Nombre          string
+    Correo          string
+    FechaNacimiento sql.NullTime
+    Genero          *string
+    Telefono        string
+    Pais            string
+    Region          string
+    Ciudad          string
+    Direccion       *string
+    Intereses       []string
+    IdiomaPreferido *string
+    Notificaciones  *bool
+    FotoPerfil      *string
+    UbicacionWKT    *string
+    RadioBusquedaKm *int
+}
+
+// UpsertProfileByKeycloak inserts or updates usuario by keycloak_id and fills extended fields
+func (r *Repo) UpsertProfileByKeycloak(ctx context.Context, keycloakID string, in ProfileInput) error {
+    // Build geometry from WKT when provided
+    var args []any
+    q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, verificado, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
+VALUES (gen_random_uuid(), $1, $2, 'cliente', $3, false, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13,false), $14, %s, $16)
+ON CONFLICT (keycloak_id) DO UPDATE SET
+  nombre=EXCLUDED.nombre,
+  correo=COALESCE(EXCLUDED.correo, usuario.correo),
+  fecha_nacimiento=EXCLUDED.fecha_nacimiento,
+  genero=EXCLUDED.genero,
+  telefono=EXCLUDED.telefono,
+  pais=EXCLUDED.pais,
+  region=EXCLUDED.region,
+  ciudad=EXCLUDED.ciudad,
+  direccion=EXCLUDED.direccion,
+  intereses=EXCLUDED.intereses,
+  idioma_preferido=EXCLUDED.idioma_preferido,
+  notificaciones_activadas=EXCLUDED.notificaciones_activadas,
+  foto_perfil=EXCLUDED.foto_perfil,
+  ubicacion=EXCLUDED.ubicacion,
+  radio_busqueda_km=EXCLUDED.radio_busqueda_km`
+    ubisql := "NULL"
+    if in.UbicacionWKT != nil {
+        ubisql = "ST_SetSRID(ST_GeomFromText($15),4326)"
+    }
+    q = fmt.Sprintf(q, ubisql)
+    intereses := pq.StringArray(in.Intereses)
+    args = []any{in.Nombre, in.Correo, keycloakID, in.FechaNacimiento, in.Genero, in.Telefono, in.Pais, in.Region, in.Ciudad, in.Direccion, intereses, in.IdiomaPreferido, in.Notificaciones, in.FotoPerfil}
+    if in.UbicacionWKT != nil { args = append(args, *in.UbicacionWKT) }
+    args = append(args, in.RadioBusquedaKm)
+    _, err := r.DB.ExecContext(ctx, q, args...)
+    return err
+}
 
 type CompaCard struct {
 	ID             string   `json:"id"`
