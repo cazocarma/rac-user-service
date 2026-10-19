@@ -15,3 +15,6 @@ server
 *.test
 vendor/
 migrations/
+
+.env*
+coverage.out

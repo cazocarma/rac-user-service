@@ -1,43 +1,39 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
+
 	"errors"
-	"net/http"
+	"fmt"
+
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/cazocarma/rac-user-service/internal/config"
+	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/cazocarma/rac-user-service/internal/repo"
 	"github.com/gin-gonic/gin"
 )
 
 type Server struct {
-	db   *sql.DB
-	repo *repo.Repo
+	db         *sql.DB
+	repo       *repo.Repo
+	cfg        config.Config
+	security   *platform.Security
+	grantCompa func(context.Context, string) error
 }
 
-func New(db *sql.DB) *Server { return &Server{db: db, repo: repo.New(db)} }
+func New(db *sql.DB, cfg config.Config) *Server {
+	return &Server{db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
+}
 
 func (s *Server) Router() *gin.Engine {
-	r := gin.Default()
+	r := gin.New()
 
-	// CORS mínimo para DEV
-	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(204)
-			return
-		}
-		c.Next()
-	})
-
-	// Health
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok", "service": "rac-user-service"})
-	})
-
+	platform.Observe(r, "rac-user-service")
+	platform.Health(r, s.db, nil)
 	api := r.Group("/api/user")
 	{
 		// Compas
@@ -45,8 +41,17 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/compas/:id", s.getCompaByID) // detalle
 
 		// Skills
-		api.GET("/skills", s.listSkills)                   // ?q=&limit=
-		api.POST("/compas/:id/skills", s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
+		api.GET("/skills", s.listSkills)                                                // ?q=&limit=
+		api.POST("/compas/:id/skills", s.security.Require("compa"), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
+
+		// Profile (requires Authorization Bearer)
+		api.GET("/me", s.security.Require("cliente"), s.me)
+		api.GET("/me/compa", s.security.Require("cliente"), s.ownCompa)
+		api.PUT("/me/compa", s.security.Require("cliente"), s.saveOwnCompa)
+		api.GET("/notifications", s.security.Require("cliente"), s.notifications)
+		api.PUT("/notifications/:id/read", s.security.Require("cliente"), s.readNotification)
+		api.POST("/compas", s.security.Require("compa"), s.publishCompa)
+		api.POST("/profile", s.security.Require("cliente"), s.upsertProfile)
 	}
 
 	return r
@@ -95,7 +100,16 @@ type addSkillsReq struct {
 }
 
 func (s *Server) addSkillsToCompa(c *gin.Context) {
-	// TODO: cuando integremos login, validar token y que id pertenezca al compa autenticado o que sea admin.
+	p := platform.Principal(c)
+	var owner string
+	if err := s.db.QueryRowContext(c, "SELECT u.keycloak_id FROM compa_perfil cp JOIN usuario u ON u.id=cp.usuario_id WHERE cp.id::text=$1", c.Param("id")).Scan(&owner); err != nil {
+		c.JSON(404, gin.H{"error": "not_found"})
+		return
+	}
+	if !p.HasRole("admin") && owner != p.Subject {
+		c.JSON(403, gin.H{"error": "forbidden"})
+		return
+	}
 	id := c.Param("id")
 	var req addSkillsReq
 	if err := c.BindJSON(&req); err != nil {
@@ -117,4 +131,116 @@ func (s *Server) addSkillsToCompa(c *gin.Context) {
 		return
 	}
 	c.JSON(200, item)
+}
+
+// ==== Profile ====
+type upsertProfileReq struct {
+	Nombre          string   `json:"nombre"`
+	Correo          string   `json:"correo"`
+	FechaNacimiento string   `json:"fecha_nacimiento"`
+	Genero          *string  `json:"genero"`
+	Telefono        string   `json:"telefono"`
+	Pais            string   `json:"pais"`
+	Region          string   `json:"region"`
+	Ciudad          string   `json:"ciudad"`
+	Direccion       *string  `json:"direccion"`
+	Intereses       []string `json:"intereses"`
+	IdiomaPreferido *string  `json:"idioma_preferido"`
+	Notificaciones  *bool    `json:"notificaciones_activadas"`
+	FotoPerfil      *string  `json:"foto_perfil"`
+	Ubicacion       *struct {
+		Lat float64 `json:"lat"`
+		Lon float64 `json:"lon"`
+	} `json:"ubicacion"`
+	RadioBusquedaKm *int `json:"radio_busqueda_km"`
+}
+
+func (s *Server) upsertProfile(c *gin.Context) {
+	principal := platform.Principal(c)
+	var body upsertProfileReq
+	if err := c.BindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid_body"})
+		return
+	}
+	if strings.TrimSpace(body.Nombre) == "" || strings.TrimSpace(body.Correo) == "" || strings.TrimSpace(body.FechaNacimiento) == "" || strings.TrimSpace(body.Telefono) == "" || strings.TrimSpace(body.Pais) == "" || strings.TrimSpace(body.Region) == "" || strings.TrimSpace(body.Ciudad) == "" {
+		c.JSON(400, gin.H{"error": "missing_required"})
+		return
+	}
+	// parse fecha
+	var fNac sql.NullTime
+	if t, err := time.Parse("2006-01-02", strings.Split(body.FechaNacimiento, "T")[0]); err == nil {
+		fNac.Time = t
+		fNac.Valid = true
+		// >=18
+		if t.After(time.Now().AddDate(-18, 0, 0)) {
+			c.JSON(400, gin.H{"error": "must_be_18_plus"})
+			return
+		}
+	} else {
+		c.JSON(400, gin.H{"error": "invalid_fecha_nacimiento"})
+		return
+	}
+
+	// ubicacion WKT
+	var wkt *string
+	if body.Ubicacion != nil {
+		sWKT := fmt.Sprintf("POINT(%f %f)", body.Ubicacion.Lon, body.Ubicacion.Lat)
+		wkt = &sWKT
+	}
+
+	// call repo
+	in := repo.ProfileInput{
+		Nombre: body.Nombre, Correo: principal.Email, FechaNacimiento: fNac, Genero: body.Genero, Telefono: body.Telefono,
+		Pais: body.Pais, Region: body.Region, Ciudad: body.Ciudad, Direccion: body.Direccion, Intereses: body.Intereses,
+		IdiomaPreferido: body.IdiomaPreferido, Notificaciones: body.Notificaciones, FotoPerfil: body.FotoPerfil,
+		UbicacionWKT: wkt, RadioBusquedaKm: body.RadioBusquedaKm,
+	}
+	if err := s.repo.UpsertProfileByKeycloak(c, principal.Subject, in); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (s *Server) me(c *gin.Context) {
+	p := platform.Principal(c)
+	var id string
+	name := p.Name
+	if name == "" {
+		name = p.Username
+	}
+	if name == "" {
+		name = "Usuario"
+	}
+	if p.Email == "" {
+		c.JSON(403, gin.H{"error": "email_required"})
+		return
+	}
+	err := s.db.QueryRowContext(c, `INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,verificado)
+ VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) ON CONFLICT(keycloak_id) DO UPDATE SET rol=EXCLUDED.rol,correo=EXCLUDED.correo,verificado=EXCLUDED.verificado RETURNING id::text`, name, p.Email, p.Role(), p.Subject, p.EmailVerified).Scan(&id)
+	if err != nil {
+		c.JSON(409, gin.H{"error": "identity_conflict"})
+		return
+	}
+	c.JSON(200, gin.H{"id": id, "sub": p.Subject, "nombre": name, "correo": p.Email, "role": p.Role()})
+}
+func (s *Server) publishCompa(c *gin.Context) {
+	p := platform.Principal(c)
+	var body struct {
+		Descripcion string  `json:"descripcion"`
+		Tarifa      float64 `json:"tarifa_hora"`
+	}
+	if c.ShouldBindJSON(&body) != nil || body.Tarifa < 0 {
+		c.JSON(400, gin.H{"error": "invalid_body"})
+		return
+	}
+	var id string
+	err := s.db.QueryRowContext(c, `INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora)
+ SELECT gen_random_uuid(),id,$2,$3 FROM usuario WHERE keycloak_id=$1
+ ON CONFLICT(usuario_id) DO UPDATE SET descripcion=EXCLUDED.descripcion,tarifa_hora=EXCLUDED.tarifa_hora RETURNING id::text`, p.Subject, body.Descripcion, body.Tarifa).Scan(&id)
+	if err != nil {
+		c.JSON(409, gin.H{"error": "profile_required"})
+		return
+	}
+	c.JSON(200, gin.H{"id": id})
 }

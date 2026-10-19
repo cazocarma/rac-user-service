@@ -8,14 +8,16 @@ import (
 type Config struct {
 	Port        string
 	DatabaseURL string
+	AuthBaseURL string
 }
 
 func Get() Config {
 	cfg := Config{
 		Port:        getenv("PORT", "8080"),
 		DatabaseURL: getenv("DATABASE_URL", "postgres://postgres:postgres@postgres:5432/rentacompa?sslmode=disable"),
+		AuthBaseURL: getenv("BACKEND_AUTH_URL", "http://rac-auth-service:8080"),
 	}
-	log.Printf("[user-svc] DB=%s", cfg.DatabaseURL)
+	log.Print("[user-svc] database configured")
 	return cfg
 }
 
