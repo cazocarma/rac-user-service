@@ -1,12 +1,12 @@
 package repo
 
 import (
-    "context"
-    "database/sql"
-    "fmt"
-    "strings"
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
 
-    "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type Repo struct{ DB *sql.DB }
@@ -14,28 +14,28 @@ type Repo struct{ DB *sql.DB }
 func New(db *sql.DB) *Repo { return &Repo{DB: db} }
 
 type ProfileInput struct {
-    Nombre          string
-    Correo          string
-    FechaNacimiento sql.NullTime
-    Genero          *string
-    Telefono        string
-    Pais            string
-    Region          string
-    Ciudad          string
-    Direccion       *string
-    Intereses       []string
-    IdiomaPreferido *string
-    Notificaciones  *bool
-    FotoPerfil      *string
-    UbicacionWKT    *string
-    RadioBusquedaKm *int
+	Nombre          string
+	Correo          string
+	FechaNacimiento sql.NullTime
+	Genero          *string
+	Telefono        string
+	Pais            string
+	Region          string
+	Ciudad          string
+	Direccion       *string
+	Intereses       []string
+	IdiomaPreferido *string
+	Notificaciones  *bool
+	FotoPerfil      *string
+	UbicacionWKT    *string
+	RadioBusquedaKm *int
 }
 
 // UpsertProfileByKeycloak inserts or updates usuario by keycloak_id and fills extended fields
 func (r *Repo) UpsertProfileByKeycloak(ctx context.Context, keycloakID string, in ProfileInput) error {
-    // Build geometry from WKT when provided
-    var args []any
-    q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, verificado, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
+	// Build geometry from WKT when provided
+	var args []any
+	q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, verificado, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
 VALUES (gen_random_uuid(), $1, $2, 'cliente', $3, false, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13,false), $14, %s, $16)
 ON CONFLICT (keycloak_id) DO UPDATE SET
   nombre=EXCLUDED.nombre,
@@ -53,17 +53,17 @@ ON CONFLICT (keycloak_id) DO UPDATE SET
   foto_perfil=EXCLUDED.foto_perfil,
   ubicacion=EXCLUDED.ubicacion,
   radio_busqueda_km=EXCLUDED.radio_busqueda_km`
-    ubisql := "NULL"
-    if in.UbicacionWKT != nil {
-        ubisql = "ST_SetSRID(ST_GeomFromText($15),4326)"
-    }
-    q = fmt.Sprintf(q, ubisql)
-    intereses := pq.StringArray(in.Intereses)
-    args = []any{in.Nombre, in.Correo, keycloakID, in.FechaNacimiento, in.Genero, in.Telefono, in.Pais, in.Region, in.Ciudad, in.Direccion, intereses, in.IdiomaPreferido, in.Notificaciones, in.FotoPerfil}
-    if in.UbicacionWKT != nil { args = append(args, *in.UbicacionWKT) }
-    args = append(args, in.RadioBusquedaKm)
-    _, err := r.DB.ExecContext(ctx, q, args...)
-    return err
+	ubisql := "ST_SetSRID(ST_GeomFromText($15),4326)"
+	if in.UbicacionWKT != nil {
+		ubisql = "ST_SetSRID(ST_GeomFromText($15),4326)"
+	}
+	q = fmt.Sprintf(q, ubisql)
+	intereses := pq.StringArray(in.Intereses)
+	args = []any{in.Nombre, in.Correo, keycloakID, in.FechaNacimiento, in.Genero, in.Telefono, in.Pais, in.Region, in.Ciudad, in.Direccion, intereses, in.IdiomaPreferido, in.Notificaciones, in.FotoPerfil}
+	args = append(args, in.UbicacionWKT)
+	args = append(args, in.RadioBusquedaKm)
+	_, err := r.DB.ExecContext(ctx, q, args...)
+	return err
 }
 
 type CompaCard struct {
@@ -129,7 +129,7 @@ SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
        cp.rating_promedio, cp.foto_url, cp.descripcion
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
-WHERE cp.id = $1
+WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)
 LIMIT 1`
 	var c CompaCard
 	var habilidades pq.StringArray
