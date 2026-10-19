@@ -15,6 +15,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/cazocarma/rac-user-service/internal/repo"
 	"github.com/gin-gonic/gin"
+	"github.com/lib/pq"
 )
 
 type Server struct {
@@ -46,6 +47,7 @@ func (s *Server) Router() *gin.Engine {
 
 		// Profile (requires Authorization Bearer)
 		api.GET("/me", s.security.Require("cliente"), s.me)
+		api.PUT("/me", s.security.Require("cliente"), s.saveMe)
 		api.GET("/me/compa", s.security.Require("cliente"), s.ownCompa)
 		api.PUT("/me/compa", s.security.Require("cliente"), s.saveOwnCompa)
 		api.GET("/notifications", s.security.Require("cliente"), s.notifications)
@@ -204,7 +206,8 @@ func (s *Server) upsertProfile(c *gin.Context) {
 
 func (s *Server) me(c *gin.Context) {
 	p := platform.Principal(c)
-	var id string
+	var id, storedName, phone, country, region, city string
+	var interests []string
 	name := p.Name
 	if name == "" {
 		name = p.Username
@@ -217,12 +220,12 @@ func (s *Server) me(c *gin.Context) {
 		return
 	}
 	err := s.db.QueryRowContext(c, `INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,verificado)
- VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) ON CONFLICT(keycloak_id) DO UPDATE SET rol=EXCLUDED.rol,correo=EXCLUDED.correo,verificado=EXCLUDED.verificado RETURNING id::text`, name, p.Email, p.Role(), p.Subject, p.EmailVerified).Scan(&id)
+ VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) ON CONFLICT(keycloak_id) DO UPDATE SET rol=EXCLUDED.rol,correo=EXCLUDED.correo,verificado=EXCLUDED.verificado RETURNING id::text,nombre,COALESCE(telefono,''),COALESCE(pais,''),COALESCE(region,''),COALESCE(ciudad,''),COALESCE(intereses,'{}'::text[])`, name, p.Email, p.Role(), p.Subject, p.EmailVerified).Scan(&id, &storedName, &phone, &country, &region, &city, pq.Array(&interests))
 	if err != nil {
 		c.JSON(409, gin.H{"error": "identity_conflict"})
 		return
 	}
-	c.JSON(200, gin.H{"id": id, "sub": p.Subject, "nombre": name, "correo": p.Email, "role": p.Role()})
+	c.JSON(200, gin.H{"id": id, "sub": p.Subject, "nombre": storedName, "correo": p.Email, "role": p.Role(), "telefono": phone, "pais": country, "region": region, "ciudad": city, "intereses": interests})
 }
 func (s *Server) publishCompa(c *gin.Context) {
 	p := platform.Principal(c)
