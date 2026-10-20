@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/config"
@@ -37,7 +38,8 @@ func main() {
 	srv := httpapi.New(db, cfg)
 	addr := ":" + cfg.Port
 	log.Printf("user service listening on %s", addr)
-	if err := srv.Router().Run(addr); err != nil {
+	server := &http.Server{Addr: addr, Handler: srv.Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

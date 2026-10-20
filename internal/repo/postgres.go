@@ -67,6 +67,8 @@ ON CONFLICT (keycloak_id) DO UPDATE SET
 }
 
 type CompaCard struct {
+	Biography      string   `json:"biografia"`
+	Interests      []string `json:"intereses"`
 	ID             string   `json:"id"`
 	UsuarioID      string   `json:"usuario_id"`
 	Nombre         string   `json:"nombre"`
@@ -88,7 +90,7 @@ func (r *Repo) ListCompas(ctx context.Context, limit, offset int, skill string) 
 	}
 	q := `
 SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
-       cp.rating_promedio, cp.foto_url, cp.descripcion
+       cp.rating_promedio, CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
 WHERE ($1 = '' OR $1 = ANY(cp.habilidades_cache))
@@ -107,7 +109,7 @@ LIMIT $2 OFFSET $3`
 		var foto, desc sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-			&c.RatingPromedio, &foto, &desc,
+			&c.RatingPromedio, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
 		); err != nil {
 			return nil, err
 		}
@@ -126,7 +128,7 @@ LIMIT $2 OFFSET $3`
 func (r *Repo) GetCompaByID(ctx context.Context, id string) (*CompaCard, error) {
 	q := `
 SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
-       cp.rating_promedio, cp.foto_url, cp.descripcion
+       cp.rating_promedio, CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
 WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)
@@ -136,7 +138,7 @@ LIMIT 1`
 	var foto, desc sql.NullString
 	if err := r.DB.QueryRowContext(ctx, q, id).Scan(
 		&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-		&c.RatingPromedio, &foto, &desc,
+		&c.RatingPromedio, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
 	); err != nil {
 		return nil, err
 	}

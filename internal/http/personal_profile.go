@@ -17,6 +17,7 @@ import (
 // compa publication fields are deliberately absent from this contract.
 type personalProfile struct {
 	Name      string   `json:"nombre"`
+	Biography string   `json:"biografia"`
 	Phone     string   `json:"telefono"`
 	Country   string   `json:"pais"`
 	Region    string   `json:"region"`
@@ -35,6 +36,10 @@ func (p *personalProfile) valid() bool {
 		}
 	}
 	if utf8.RuneCountInString(p.Name) < 2 || len(p.Interests) > 15 {
+		return false
+	}
+	p.Biography = strings.TrimSpace(p.Biography)
+	if utf8.RuneCountInString(p.Biography) > 600 || strings.ContainsFunc(p.Biography, func(r rune) bool { return unicode.IsControl(r) && r != '\n' }) {
 		return false
 	}
 	digits := 0
@@ -72,7 +77,7 @@ func (s *Server) saveMe(c *gin.Context) {
 		return
 	}
 	// Subject always comes from the verified token, never from the request body.
-	result, err := s.db.ExecContext(c, `UPDATE usuario SET nombre=$2,telefono=NULLIF($3,''),pais=NULLIF($4,''),region=NULLIF($5,''),ciudad=NULLIF($6,''),intereses=$7 WHERE keycloak_id=$1`, platform.Principal(c).Subject, body.Name, body.Phone, body.Country, body.Region, body.City, pq.Array(body.Interests))
+	result, err := s.db.ExecContext(c, `UPDATE usuario SET nombre=$2,telefono=NULLIF($3,''),pais=NULLIF($4,''),region=NULLIF($5,''),ciudad=NULLIF($6,''),intereses=$7,biografia=$8 WHERE keycloak_id=$1`, platform.Principal(c).Subject, body.Name, body.Phone, body.Country, body.Region, body.City, pq.Array(body.Interests), body.Biography)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
