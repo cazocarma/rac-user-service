@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/config"
+	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/cazocarma/rac-user-service/internal/repo"
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,7 @@ import (
 )
 
 type Server struct {
+	photoStore photostore.Store
 	photoDir   string
 	db         *sql.DB
 	repo       *repo.Repo
@@ -31,11 +33,18 @@ func New(db *sql.DB, cfg config.Config) *Server {
 	return &Server{db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
 }
 
+// SetPhotoStore configures persistence before Router is called.
+func (s *Server) SetPhotoStore(store photostore.Store) { s.photoStore = store }
+
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
 
 	platform.Observe(r, "rac-user-service")
-	platform.Health(r, s.db, nil)
+	var dependency func(context.Context) error
+	if s.photoStore != nil {
+		dependency = s.photoStore.Check
+	}
+	platform.Health(r, s.db, dependency)
 	api := r.Group("/api/user")
 	{
 		// Compas

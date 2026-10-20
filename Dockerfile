@@ -3,12 +3,13 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server && CGO_ENABLED=0 GOOS=linux go build -o migrate-photos ./cmd/migrate-photos
 
 FROM alpine:3.22
 RUN addgroup -S rac && adduser -S -G rac rac && mkdir -p /var/lib/rac/photos && chown -R rac:rac /var/lib/rac
 WORKDIR /app
 COPY --from=builder /app/server /app/server
+COPY --from=builder /app/migrate-photos /app/migrate-photos
 ENV PORT=8080
 ENV SERVICE_NAME=rac-user-service
 EXPOSE 8080

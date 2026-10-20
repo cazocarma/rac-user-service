@@ -5,11 +5,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"github.com/cazocarma/rac-user-service/internal/photostore"
+	"github.com/gin-gonic/gin"
 	"image"
 	"image/png"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,7 +20,19 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/platform"
 )
 
+type failingPhotoStore struct{ photostore.Store }
+
+func (f failingPhotoStore) Put(context.Context, string, []byte) error {
+	return errors.New("injected unavailable storage")
+}
+
 func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
+	t.Run("local", func(t *testing.T) { testProfilePhotos(t, false) })
+	if os.Getenv("RAC_PHOTO_TEST_S3_ENDPOINT") != "" {
+		t.Run("s3", func(t *testing.T) { testProfilePhotos(t, true) })
+	}
+}
+func testProfilePhotos(t *testing.T, useS3 bool) {
 	dsn := os.Getenv("RAC_ONBOARDING_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("requires disposable migrated database")
@@ -38,6 +52,13 @@ func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
 	defer db.Exec(`DELETE FROM usuario WHERE id=$1`, id)
 	s := New(db, config.Config{})
 	s.photoDir = t.TempDir()
+	if useS3 {
+		store, err := photostore.NewS3(os.Getenv("RAC_PHOTO_TEST_S3_ENDPOINT"), "us-east-1", os.Getenv("PROFILE_S3_BUCKET"), os.Getenv("PROFILE_S3_ACCESS_KEY"), os.Getenv("PROFILE_S3_SECRET_KEY"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.photoStore = store
+	}
 	s.security = &platform.Security{VerifyToken: func(ctx context.Context, token string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: sub}
 		if token == "other" {
@@ -76,14 +97,10 @@ func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
 		t.Fatal("unsafe generated key")
 	}
 	request("PUT", "/api/user/me/photo", "own", "image/png", []byte("broken replacement"), 400)
-	oldDirectory := s.photoDir
-	blocked := filepath.Join(t.TempDir(), "not-a-directory")
-	if err = os.WriteFile(blocked, []byte("fixture"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.photoDir = blocked
+	originalStore := s.photoStore
+	s.photoStore = failingPhotoStore{Store: s.photos()}
 	request("PUT", "/api/user/me/photo", "own", "image/png", imageBytes.Bytes(), 503)
-	s.photoDir = oldDirectory
+	s.photoStore = originalStore
 	var preserved string
 	if err = db.QueryRow(`SELECT foto_clave FROM usuario WHERE id=$1`, id).Scan(&preserved); err != nil || preserved != key {
 		t.Fatal("failed replacement changed photo", err)
@@ -105,7 +122,7 @@ func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
 	}
 	replacement := request("PUT", "/api/user/me/photo", "own", "image/png", imageBytes.Bytes(), 200)
 	json.Unmarshal(replacement.Body.Bytes(), &result)
-	if _, err = os.Stat(filepath.Join(s.photoDir, key)); !os.IsNotExist(err) {
+	if _, err = s.photos().Get(context.Background(), key); !errors.Is(err, photostore.ErrNotFound) {
 		t.Fatal("old photo retained")
 	}
 	request("GET", publicPath, "", "", nil, 404)
@@ -131,7 +148,7 @@ func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
 		}
 	}
 	activeFiles, _ := os.ReadDir(s.photoDir)
-	if len(activeFiles) != 1 {
+	if !useS3 && len(activeFiles) != 1 {
 		t.Fatal("concurrent replacement leaked photos", len(activeFiles))
 	}
 	if err = db.QueryRow(`SELECT foto_clave FROM usuario WHERE id=$1`, id).Scan(&preserved); err != nil {
@@ -143,7 +160,28 @@ func TestProfilePhotosOwnershipAndPublication(t *testing.T) {
 	request("DELETE", "/api/user/me/photo", "own", "", nil, 200)
 	request("GET", "/api/user/media/profile/"+result["foto_version"], "", "", nil, 404)
 	files, _ := os.ReadDir(s.photoDir)
-	if len(files) != 0 {
+	if !useS3 && len(files) != 0 {
 		t.Fatal("deleted photos remain on disk")
+	}
+}
+
+type unreadablePhotoStore struct{ photostore.Store }
+
+func (f unreadablePhotoStore) Get(context.Context, string) ([]byte, error) {
+	return nil, errors.New("storage offline")
+}
+func (f unreadablePhotoStore) Check(context.Context) error { return errors.New("storage offline") }
+func TestPhotoStorageUnavailableIs503(t *testing.T) {
+	store := unreadablePhotoStore{}
+	server := &Server{photoStore: store}
+	r := gin.New()
+	platform.Health(r, nil, store.Check)
+	r.GET("/photo", func(c *gin.Context) { server.servePhoto(c, strings.Repeat("a", 32)+".jpg") })
+	for _, path := range []string{"/photo", "/ready"} {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 503 {
+			t.Fatal("storage outage hidden", path, w.Code)
+		}
 	}
 }

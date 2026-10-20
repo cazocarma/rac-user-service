@@ -1,18 +1,21 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log"
 	"mime"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/photos"
+	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/gin-gonic/gin"
 )
@@ -30,11 +33,20 @@ func (s *Server) photoDirectory() string {
 	return "/var/lib/rac/photos"
 }
 
-func (s *Server) removePhotoFile(key string) {
+func (s *Server) photos() photostore.Store {
+	if s.photoStore != nil {
+		return s.photoStore
+	}
+	return photostore.Local{Directory: s.photoDirectory()}
+}
+
+func (s *Server) removePhotoObject(key string) {
 	if !photoKey.MatchString(key) {
 		return
 	}
-	if err := os.Remove(filepath.Join(s.photoDirectory(), key)); err != nil && !os.IsNotExist(err) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	if err := s.photos().Delete(ctx, key); err != nil {
 		log.Print("profile_photo_cleanup_failed")
 	}
 }
@@ -78,43 +90,31 @@ func (s *Server) savePhoto(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
-	if err = os.MkdirAll(s.photoDirectory(), 0700); err != nil {
-		c.JSON(503, gin.H{"error": "photo_unavailable"})
-		return
-	}
 	var random [16]byte
 	if _, err = rand.Read(random[:]); err != nil {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
 	key := hex.EncodeToString(random[:]) + ".jpg"
-	path := filepath.Join(s.photoDirectory(), key)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		c.JSON(503, gin.H{"error": "photo_unavailable"})
-		return
-	}
-	_, writeErr := file.Write(normalized)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if writeErr != nil || syncErr != nil || closeErr != nil {
-		s.removePhotoFile(key)
+	if err = s.photos().Put(c.Request.Context(), key, normalized); err != nil {
+		// An uncertain remote write may leave an unreachable object. Never change
+		// the DB pointer on failure; cleanup can be retried separately.
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
 	if _, err = tx.ExecContext(c.Request.Context(), `UPDATE usuario SET foto_clave=$2 WHERE keycloak_id=$1`, platform.Principal(c).Subject, key); err != nil {
-		s.removePhotoFile(key)
+		s.removePhotoObject(key)
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
-	// Commit errors can have uncertain outcomes: retain the new file so a
+	// Commit errors can have uncertain outcomes: retain the new object so a
 	// committed reference cannot become broken. It is unreachable if rolled back.
 	if err = tx.Commit(); err != nil {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
 	if previous.Valid {
-		s.removePhotoFile(previous.String)
+		s.removePhotoObject(previous.String)
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(200, gin.H{"foto_version": key})
@@ -146,7 +146,7 @@ func (s *Server) deletePhoto(c *gin.Context) {
 		return
 	}
 	if previous.Valid {
-		s.removePhotoFile(previous.String)
+		s.removePhotoObject(previous.String)
 	}
 	c.JSON(200, gin.H{"ok": true})
 }
@@ -186,9 +186,13 @@ func (s *Server) servePhoto(c *gin.Context, key string) {
 		c.Status(404)
 		return
 	}
-	raw, err := os.ReadFile(filepath.Join(s.photoDirectory(), key))
-	if err != nil {
+	raw, err := s.photos().Get(c.Request.Context(), key)
+	if errors.Is(err, photostore.ErrNotFound) {
 		c.Status(404)
+		return
+	}
+	if err != nil {
+		c.Status(503)
 		return
 	}
 	c.Header("Cache-Control", "no-store")
