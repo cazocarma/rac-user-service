@@ -80,6 +80,10 @@ func (s *Server) savePhoto(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(c.Request.Context(), `SELECT pg_advisory_xact_lock_shared(726224,1)`); err != nil {
+		c.JSON(503, gin.H{"error": "photo_unavailable"})
+		return
+	}
 	var previous sql.NullString
 	err = tx.QueryRowContext(c.Request.Context(), `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
 	if err == sql.ErrNoRows {
@@ -127,6 +131,10 @@ func (s *Server) deletePhoto(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(c.Request.Context(), `SELECT pg_advisory_xact_lock_shared(726224,1)`); err != nil {
+		c.JSON(503, gin.H{"error": "photo_unavailable"})
+		return
+	}
 	var previous sql.NullString
 	err = tx.QueryRowContext(c.Request.Context(), `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
 	if err == sql.ErrNoRows {

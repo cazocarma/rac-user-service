@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
@@ -97,6 +98,30 @@ func testProfilePhotos(t *testing.T, useS3 bool) {
 		t.Fatal("unsafe generated key")
 	}
 	request("PUT", "/api/user/me/photo", "own", "image/png", []byte("broken replacement"), 400)
+	lock, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = lock.ExecContext(context.Background(), `SELECT pg_advisory_lock(726224,1)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"PUT", "DELETE"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		req := httptest.NewRequest(method, "/api/user/me/photo", bytes.NewReader(imageBytes.Bytes())).WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer own")
+		req.Header.Set("Content-Type", "image/png")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		cancel()
+		if w.Code != 503 {
+			t.Error("photo write bypassed backup lock", method, w.Code)
+		}
+	}
+	_, err = lock.ExecContext(context.Background(), `SELECT pg_advisory_unlock(726224,1)`)
+	lock.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
 	originalStore := s.photoStore
 	s.photoStore = failingPhotoStore{Store: s.photos()}
 	request("PUT", "/api/user/me/photo", "own", "image/png", imageBytes.Bytes(), 503)

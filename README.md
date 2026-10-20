@@ -32,3 +32,16 @@ RAC_ONBOARDING_TEST_DATABASE_URL apuntando a una base desechable migrada.
 RAC_PHOTO_TEST_S3_ENDPOINT junto con PROFILE_S3_* habilita la variante RustFS.
 El script infra/scripts/test_photo_storage.py prepara la base, ejecuta las pruebas
 y limpia los datos de prueba. Nunca usar una base de usuarios reales para tests.
+
+## Resenas verificadas y coordinacion de respaldos
+
+POST/GET /api/user/bookings/:id/review requieren OIDC y propiedad/participacion.
+POST exige cliente contratante, estado finalizada y horario ya terminado. Una
+resena por reserva; repetir el mismo contenido devuelve la existente, y cambiarla
+se rechaza. GET /api/user/compas/:id/reviews pagina publicamente sin datos del autor.
+La media y cantidad del compa se calculan de reserva_resena; requieren migracion V008.
+
+Guardar/eliminar fotos obtiene el advisory lock transaccional compartido
+(726224,1). El agente de respaldo obtiene el exclusivo antes de exportar snapshot
+y copiar las fotos referenciadas. Mantener esta coordinacion al agregar otras
+rutas de escritura/limpieza de fotos. No copiar directamente volumenes en caliente.

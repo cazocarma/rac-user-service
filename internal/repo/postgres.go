@@ -74,6 +74,7 @@ type CompaCard struct {
 	Nombre         string   `json:"nombre"`
 	TarifaHora     float64  `json:"tarifa_hora"`
 	Habilidades    []string `json:"habilidades"`
+	ReviewCount    int      `json:"cantidad_resenas"`
 	RatingPromedio float64  `json:"rating_promedio"`
 	FotoURL        *string  `json:"foto_url,omitempty"`
 	Descripcion    *string  `json:"descripcion,omitempty"`
@@ -90,11 +91,12 @@ func (r *Repo) ListCompas(ctx context.Context, limit, offset int, skill string) 
 	}
 	q := `
 SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
-       cp.rating_promedio, CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
+       COALESCE(rv.promedio,0), COALESCE(rv.cantidad,0), CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
+LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
 WHERE ($1 = '' OR $1 = ANY(cp.habilidades_cache))
-ORDER BY cp.rating_promedio DESC NULLS LAST, cp.tarifa_hora ASC NULLS LAST
+ORDER BY COALESCE(rv.promedio,0) DESC, cp.tarifa_hora ASC NULLS LAST
 LIMIT $2 OFFSET $3`
 	rows, err := r.DB.QueryContext(ctx, q, skill, limit, offset)
 	if err != nil {
@@ -109,7 +111,7 @@ LIMIT $2 OFFSET $3`
 		var foto, desc sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-			&c.RatingPromedio, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
+			&c.RatingPromedio, &c.ReviewCount, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
 		); err != nil {
 			return nil, err
 		}
@@ -128,9 +130,10 @@ LIMIT $2 OFFSET $3`
 func (r *Repo) GetCompaByID(ctx context.Context, id string) (*CompaCard, error) {
 	q := `
 SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
-       cp.rating_promedio, CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
+       COALESCE(rv.promedio,0), COALESCE(rv.cantidad,0), CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
+LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
 WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)
 LIMIT 1`
 	var c CompaCard
@@ -138,7 +141,7 @@ LIMIT 1`
 	var foto, desc sql.NullString
 	if err := r.DB.QueryRowContext(ctx, q, id).Scan(
 		&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-		&c.RatingPromedio, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
+		&c.RatingPromedio, &c.ReviewCount, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
 	); err != nil {
 		return nil, err
 	}

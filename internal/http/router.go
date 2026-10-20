@@ -48,7 +48,10 @@ func (s *Server) Router() *gin.Engine {
 	api := r.Group("/api/user")
 	{
 		// Compas
-		api.GET("/compas", s.listCompas)       // ?limit=&offset=&skill=
+		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
+		api.GET("/compas/:id/reviews", s.publicReviews)
+		api.GET("/bookings/:id/review", s.security.Require("cliente"), s.bookingReview)
+		api.POST("/bookings/:id/review", s.security.Require("cliente"), s.saveReview)
 		api.GET("/compas/:id", s.getCompaByID) // detalle
 
 		// Skills

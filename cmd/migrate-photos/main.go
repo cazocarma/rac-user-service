@@ -24,6 +24,9 @@ func migratePhotos(ctx context.Context, db *sql.DB, source, target photostore.St
 		return 0, errors.New("migration transaction failed")
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(726224,1)`); err != nil {
+		return 0, errors.New("photo migration blocked by backup or cancelled")
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT foto_clave FROM usuario WHERE foto_clave IS NOT NULL ORDER BY id FOR UPDATE`)
 	if err != nil {
 		return 0, errors.New("could not lock photo references")
