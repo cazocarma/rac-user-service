@@ -12,7 +12,7 @@ import (
 func TestPrivateEndpointsRejectAnonymous(t *testing.T) {
 	s := New(nil, config.Config{})
 	r := s.Router()
-	for method, path := range map[string]string{"GET": "/api/user/notifications", "PUT": "/api/user/notifications/foreign/read"} {
+	for method, path := range map[string]string{"GET": "/api/user/me", "PUT": "/api/user/me"} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(method, path, nil))
 		if w.Code != 401 {
