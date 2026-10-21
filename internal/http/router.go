@@ -67,8 +67,6 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/media/profile/:key", s.publicPhoto)
 		api.GET("/me/compa", s.security.Require("cliente"), s.ownCompa)
 		api.PUT("/me/compa", s.security.Require("cliente"), s.saveOwnCompa)
-		api.GET("/notifications", s.security.Require("cliente"), s.notifications)
-		api.PUT("/notifications/:id/read", s.security.Require("cliente"), s.readNotification)
 		api.POST("/compas", s.security.Require("compa"), s.publishCompa)
 		api.POST("/profile", s.security.Require("cliente"), s.upsertProfile)
 	}
