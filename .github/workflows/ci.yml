@@ -1,7 +1,6 @@
 name: Go CI
 on:
-  pull_request:
-    branches: [dev, qa, prd, main]
+  pull_request: {}
   push:
     branches: [dev, qa, prd, main]
 permissions:
