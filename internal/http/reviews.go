@@ -55,7 +55,7 @@ func (s *Server) saveReview(c *gin.Context) {
 	defer tx.Rollback()
 	var client, compa, state string
 	var end time.Time
-	err = tx.QueryRowContext(ctx, `SELECT se.cliente_id::text,se.compa_id::text,se.estado::text,se.fecha_fin FROM sesion se JOIN usuario u ON u.id=se.cliente_id WHERE se.id=$1 AND u.keycloak_id=$2 FOR UPDATE OF se`, c.Param("id"), platform.Principal(c).Subject).Scan(&client, &compa, &state, &end)
+	err = tx.QueryRowContext(ctx, `SELECT se.cliente_id::text,se.compa_id::text,se.estado::text,se.fecha_fin FROM lock_booking($1,$2,false) se JOIN usuario u ON u.id=se.cliente_id WHERE u.keycloak_id=$2`, c.Param("id"), platform.Principal(c).Subject).Scan(&client, &compa, &state, &end)
 	if err == sql.ErrNoRows {
 		c.JSON(404, gin.H{"error": "booking_not_found"})
 		return
