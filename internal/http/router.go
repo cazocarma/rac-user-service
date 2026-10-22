@@ -46,6 +46,7 @@ func (s *Server) Router() *gin.Engine {
 	}
 	platform.Health(r, s.db, dependency)
 	api := r.Group("/api/user")
+	api.GET("/admin/summary", s.security.Require("admin"), s.adminStats)
 	{
 		// Compas
 		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
