@@ -32,7 +32,7 @@ type ProfileInput struct {
 }
 
 // UpsertProfileByKeycloak inserts or updates usuario by keycloak_id and fills extended fields
-func (r *Repo) UpsertProfileByKeycloak(ctx context.Context, keycloakID string, in ProfileInput) error {
+func (r *Repo) UpsertProfileByKeycloak(ctx context.Context, keycloakID string, in ProfileInput, beforeCommit ...func(context.Context, *sql.Tx) error) error {
 	// Build geometry from WKT when provided
 	var args []any
 	q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, verificado, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
@@ -62,8 +62,22 @@ ON CONFLICT (keycloak_id) DO UPDATE SET
 	args = []any{in.Nombre, in.Correo, keycloakID, in.FechaNacimiento, in.Genero, in.Telefono, in.Pais, in.Region, in.Ciudad, in.Direccion, intereses, in.IdiomaPreferido, in.Notificaciones, in.FotoPerfil}
 	args = append(args, in.UbicacionWKT)
 	args = append(args, in.RadioBusquedaKm)
-	_, err := r.DB.ExecContext(ctx, q, args...)
-	return err
+	tx, err := r.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, q, args...); err != nil {
+		return err
+	}
+	for _, check := range beforeCommit {
+		if check != nil {
+			if err = check(ctx, tx); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 type CompaCard struct {

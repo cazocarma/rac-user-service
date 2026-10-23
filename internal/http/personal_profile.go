@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/gin-gonic/gin"
 	"github.com/lib/pq"
@@ -76,8 +77,19 @@ func (s *Server) saveMe(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_profile"})
 		return
 	}
+	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: platform.Principal(c).Subject, Capability: standing.PublishListing})
+	defer cancel()
+	if !ok {
+		return
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
+		return
+	}
+	defer tx.Rollback()
 	// Subject always comes from the verified token, never from the request body.
-	result, err := s.db.ExecContext(c, `UPDATE usuario SET nombre=$2,telefono=NULLIF($3,''),pais=NULLIF($4,''),region=NULLIF($5,''),ciudad=NULLIF($6,''),intereses=$7,biografia=$8 WHERE keycloak_id=$1`, platform.Principal(c).Subject, body.Name, body.Phone, body.Country, body.Region, body.City, pq.Array(body.Interests), body.Biography)
+	result, err := tx.ExecContext(ctx, `UPDATE usuario SET nombre=$2,telefono=NULLIF($3,''),pais=NULLIF($4,''),region=NULLIF($5,''),ciudad=NULLIF($6,''),intereses=$7,biografia=$8 WHERE keycloak_id=$1`, platform.Principal(c).Subject, body.Name, body.Phone, body.Country, body.Region, body.City, pq.Array(body.Interests), body.Biography)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
@@ -89,6 +101,16 @@ func (s *Server) saveMe(c *gin.Context) {
 	}
 	if count == 0 {
 		c.JSON(409, gin.H{"error": "profile_required"})
+		return
+	}
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			reviewStandingFailure(c, err)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
 	}
 	c.JSON(200, gin.H{"ok": true})

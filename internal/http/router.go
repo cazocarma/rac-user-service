@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"github.com/cazocarma/rac-platform/standing"
+	standingdb "github.com/cazocarma/rac-platform/standing/postgres"
 
 	"errors"
 	"fmt"
@@ -232,8 +233,32 @@ func (s *Server) upsertProfile(c *gin.Context) {
 		IdiomaPreferido: body.IdiomaPreferido, Notificaciones: body.Notificaciones, FotoPerfil: body.FotoPerfil,
 		UbicacionWKT: wkt, RadioBusquedaKm: body.RadioBusquedaKm,
 	}
-	if err := s.repo.UpsertProfileByKeycloak(c, principal.Subject, in); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+	ctx := c.Request.Context()
+	cancel := func() {}
+	if standingEnabled() {
+		ctx, cancel = context.WithTimeout(ctx, standing.MaxLease)
+	}
+	defer cancel()
+	check := func(ctx context.Context, tx *sql.Tx) error {
+		if !standingEnabled() {
+			return nil
+		}
+		// New users receive standing through the same transaction's insert
+		// trigger. Query that uncommitted authority locally; existing accounts
+		// still observe current committed sanctions under READ COMMITTED.
+		bounded, permit, cancel, err := standing.Acquire(ctx, standingdb.New(tx), standing.Requirement{Subject: principal.Subject, Capability: standing.PublishListing})
+		defer cancel()
+		if err != nil {
+			return err
+		}
+		return permit.Check(bounded)
+	}
+	if err := s.repo.UpsertProfileByKeycloak(ctx, principal.Subject, in, check); err != nil {
+		if errors.Is(err, standing.ErrDenied) || errors.Is(err, standing.ErrUnavailable) {
+			reviewStandingFailure(c, err)
+			return
+		}
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
 	}
 	c.JSON(200, gin.H{"ok": true})
