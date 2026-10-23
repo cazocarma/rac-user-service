@@ -25,6 +25,22 @@ type Permit struct {
 	deadline     time.Time
 }
 
+// Version returns the authority version used by this permit for provenance.
+// It is not an authorization check: callers must still Check before Commit.
+// When a subject has multiple requirements, retain the oldest observed version.
+func (p *Permit) Version(subject string) (uint64, bool) {
+	if p == nil {
+		return 0, false
+	}
+	var version uint64
+	for i, r := range p.requirements {
+		if r.Subject == subject && (version == 0 || p.versions[i] < version) {
+			version = p.versions[i]
+		}
+	}
+	return version, version > 0
+}
+
 // Acquire loads both parties concurrently. Use the returned context to begin
 // the SQL transaction, call Check immediately before Commit, and always cancel.
 // Lock waits and remote reads consume the same budget; Check never renews it.
