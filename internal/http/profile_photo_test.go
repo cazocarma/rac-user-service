@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/png"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +21,19 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 )
+
+type revokingPhotoStore struct {
+	photostore.Store
+	revoke func()
+}
+
+func (s revokingPhotoStore) Put(ctx context.Context, key string, raw []byte) error {
+	if err := s.Store.Put(ctx, key, raw); err != nil {
+		return err
+	}
+	s.revoke()
+	return nil
+}
 
 type failingPhotoStore struct{ photostore.Store }
 
@@ -51,7 +65,19 @@ func testProfilePhotos(t *testing.T, useS3 bool) {
 		t.Fatal(err)
 	}
 	defer db.Exec(`DELETE FROM usuario WHERE id=$1`, id)
-	s := New(db, config.Config{})
+	connection, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := connection.Query()
+	options.Set("options", "-c role=rac_user")
+	connection.RawQuery = options.Encode()
+	serviceDB, err := sql.Open("postgres", connection.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serviceDB.Close()
+	s := New(serviceDB, config.Config{})
 	s.photoDir = t.TempDir()
 	if useS3 {
 		store, err := photostore.NewS3(os.Getenv("RAC_PHOTO_TEST_S3_ENDPOINT"), "us-east-1", os.Getenv("PROFILE_S3_BUCKET"), os.Getenv("PROFILE_S3_ACCESS_KEY"), os.Getenv("PROFILE_S3_SECRET_KEY"))
@@ -180,6 +206,33 @@ func testProfilePhotos(t *testing.T, useS3 bool) {
 		t.Fatal(err)
 	}
 	result["foto_version"] = preserved
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	setStanding := func(status string) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE standing.account SET status=$2,version=version+1 WHERE subject_id=$1`, id, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStanding("suspended")
+	request("PUT", "/api/user/me/photo", "own", "image/png", imageBytes.Bytes(), 403)
+	request("GET", "/api/user/me/photo", "own", "", nil, 200)
+	request("GET", "/api/user/media/profile/"+preserved, "", "", nil, 404)
+	setStanding("active")
+	originalStore = s.photoStore
+	s.photoStore = revokingPhotoStore{Store: s.photos(), revoke: func() { setStanding("banned") }}
+	request("PUT", "/api/user/me/photo", "own", "image/png", imageBytes.Bytes(), 403)
+	s.photoStore = originalStore
+	var after string
+	if err := db.QueryRow(`SELECT foto_clave FROM usuario WHERE id=$1`, id).Scan(&after); err != nil || after != preserved {
+		t.Fatal("revoked photo changed reference", after, err)
+	}
+	if !useS3 {
+		files, _ := os.ReadDir(s.photoDir)
+		if len(files) != 1 {
+			t.Fatal("revoked photo leaked object", len(files))
+		}
+	}
+
 	request("DELETE", "/api/user/me/photo", "other", "", nil, 409)
 	request("DELETE", "/api/user/me/photo", "own", "", nil, 200)
 	request("DELETE", "/api/user/me/photo", "own", "", nil, 200)

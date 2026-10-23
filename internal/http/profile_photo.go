@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-user-service/internal/photos"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
@@ -75,18 +76,23 @@ func (s *Server) savePhoto(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	tx, err := s.db.BeginTx(c.Request.Context(), nil)
+	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: platform.Principal(c).Subject, Capability: standing.PublishListing})
+	defer cancel()
+	if !ok {
+		return
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(c.Request.Context(), `SELECT pg_advisory_xact_lock_shared(726224,1)`); err != nil {
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(726224,1)`); err != nil {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
 	var previous sql.NullString
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
+	err = tx.QueryRowContext(ctx, `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
 	if err == sql.ErrNoRows {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return
@@ -101,16 +107,23 @@ func (s *Server) savePhoto(c *gin.Context) {
 		return
 	}
 	key := hex.EncodeToString(random[:]) + ".jpg"
-	if err = s.photos().Put(c.Request.Context(), key, normalized); err != nil {
+	if err = s.photos().Put(ctx, key, normalized); err != nil {
 		// An uncertain remote write may leave an unreachable object. Never change
 		// the DB pointer on failure; cleanup can be retried separately.
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
-	if _, err = tx.ExecContext(c.Request.Context(), `UPDATE usuario SET foto_clave=$2 WHERE keycloak_id=$1`, platform.Principal(c).Subject, key); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE usuario SET foto_clave=$2 WHERE keycloak_id=$1`, platform.Principal(c).Subject, key); err != nil {
 		s.removePhotoObject(key)
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
+	}
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			s.removePhotoObject(key)
+			reviewStandingFailure(c, err)
+			return
+		}
 	}
 	// Commit errors can have uncertain outcomes: retain the new object so a
 	// committed reference cannot become broken. It is unreachable if rolled back.
