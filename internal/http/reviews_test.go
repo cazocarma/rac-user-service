@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -54,7 +55,19 @@ func TestVerifiedReviews(t *testing.T) {
 		bookings = append(bookings, id)
 		return id
 	}
-	server := New(db, config.Config{})
+	connection, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := connection.Query()
+	options.Set("options", "-c role=rac_user")
+	connection.RawQuery = options.Encode()
+	serviceDB, err := sql.Open("postgres", connection.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serviceDB.Close()
+	server := New(serviceDB, config.Config{})
 	server.security = &platform.Security{VerifyToken: func(ctx context.Context, token string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: ids[0]}
 		if token == "provider" {
@@ -146,4 +159,20 @@ func TestVerifiedReviews(t *testing.T) {
 	if _, err = db.Exec(`INSERT INTO reserva_resena(sesion_id,cliente_id,compa_id,puntuacion) VALUES($1,$2,$3,5)`, pending, ids[0], ids[1]); err == nil {
 		t.Fatal("database accepted unverified review")
 	}
+	// Both participants' current standing is required even with an unchanged
+	// authenticated identity; protective history remains available.
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	guarded := "/api/user/bookings/" + booking("finalizada", false) + "/review"
+	for _, subject := range ids[:2] {
+		if _, err := db.Exec(`UPDATE standing.account SET status='suspended',version=version+1 WHERE subject_id=$1`, subject); err != nil {
+			t.Fatal(err)
+		}
+		request("POST", guarded, "client", `{"puntuacion":5}`, 403)
+		request("GET", path, "client", "", 200)
+		if _, err := db.Exec(`UPDATE standing.account SET status='active',version=version+1 WHERE subject_id=$1`, subject); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request("POST", guarded, "client", `{"puntuacion":5}`, 201)
+
 }

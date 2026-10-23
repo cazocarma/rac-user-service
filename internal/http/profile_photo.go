@@ -17,6 +17,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/photos"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 	"github.com/gin-gonic/gin"
 )
 
@@ -177,7 +178,7 @@ func (s *Server) publicPhoto(c *gin.Context) {
 		return
 	}
 	var exists bool
-	err := s.db.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM usuario u JOIN compa_perfil cp ON cp.usuario_id=u.id WHERE u.foto_clave=$1)`, key).Scan(&exists)
+	err := s.db.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM usuario u JOIN compa_perfil cp ON cp.usuario_id=u.id WHERE u.foto_clave=$1`+repo.PublicStandingClause(standingEnabled())+`)`, key).Scan(&exists)
 	if err != nil {
 		c.Status(503)
 		return

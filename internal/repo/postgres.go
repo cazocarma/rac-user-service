@@ -82,7 +82,7 @@ type CompaCard struct {
 
 /*************** COMPAS ****************/
 
-func (r *Repo) ListCompas(ctx context.Context, limit, offset int, skill string) ([]CompaCard, error) {
+func (r *Repo) ListCompas(ctx context.Context, limit, offset int, skill string, enforceStanding ...bool) ([]CompaCard, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
@@ -95,8 +95,8 @@ SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
 LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
-WHERE ($1 = '' OR $1 = ANY(cp.habilidades_cache))
-ORDER BY COALESCE(rv.promedio,0) DESC, cp.tarifa_hora ASC NULLS LAST
+WHERE ($1 = '' OR $1 = ANY(cp.habilidades_cache))` + PublicStandingClause(len(enforceStanding) > 0 && enforceStanding[0]) + `
+ORDER BY COALESCE(rv.promedio,0) DESC, cp.tarifa_hora ASC NULLS LAST, cp.id ASC
 LIMIT $2 OFFSET $3`
 	rows, err := r.DB.QueryContext(ctx, q, skill, limit, offset)
 	if err != nil {
@@ -127,14 +127,14 @@ LIMIT $2 OFFSET $3`
 	return out, rows.Err()
 }
 
-func (r *Repo) GetCompaByID(ctx context.Context, id string) (*CompaCard, error) {
+func (r *Repo) GetCompaByID(ctx context.Context, id string, enforceStanding ...bool) (*CompaCard, error) {
 	q := `
 SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
        COALESCE(rv.promedio,0), COALESCE(rv.cantidad,0), CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
 LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
-WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)
+WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)` + PublicStandingClause(len(enforceStanding) > 0 && enforceStanding[0]) + `
 LIMIT 1`
 	var c CompaCard
 	var habilidades pq.StringArray
@@ -187,7 +187,7 @@ LIMIT $2`
 }
 
 // AddSkillsToPerfil upsertea skills por nombre y crea las relaciones para un perfil.
-func (r *Repo) AddSkillsToPerfil(ctx context.Context, perfilID string, skills []string) error {
+func (r *Repo) AddSkillsToPerfil(ctx context.Context, perfilID string, skills []string, beforeCommit ...func(context.Context) error) error {
 	if len(skills) == 0 {
 		return nil
 	}
@@ -241,6 +241,12 @@ ON CONFLICT DO NOTHING
 			return err
 		}
 	}
-
+	for _, check := range beforeCommit {
+		if check != nil {
+			if err := check(ctx); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }

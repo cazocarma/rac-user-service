@@ -46,7 +46,11 @@ func (s *Server) saveReview(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_review"})
 		return
 	}
-	ctx := c.Request.Context()
+	ctx, permit, cancel, ok := s.reviewPermit(c)
+	defer cancel()
+	if !ok {
+		return
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "review_unavailable"})
@@ -86,6 +90,12 @@ func (s *Server) saveReview(c *gin.Context) {
 	if err != nil {
 		c.JSON(503, gin.H{"error": "review_unavailable"})
 		return
+	}
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			reviewStandingFailure(c, err)
+			return
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		c.JSON(503, gin.H{"error": "review_unavailable"})
@@ -127,7 +137,7 @@ func (s *Server) bookingReview(c *gin.Context) {
 }
 func (s *Server) publicReviews(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	compa, err := s.repo.GetCompaByID(c.Request.Context(), c.Param("id"))
+	compa, err := s.repo.GetCompaByID(c.Request.Context(), c.Param("id"), standingEnabled())
 	if err == sql.ErrNoRows {
 		c.Status(404)
 		return

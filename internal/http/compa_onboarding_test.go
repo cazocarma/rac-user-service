@@ -86,9 +86,10 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 		t.Fatalf("scoped service connection unavailable: %s %v", role, err)
 	}
 	s := New(serviceDB, config.Config{})
+	roles := []string{"cliente"}
 	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: sub}
-		p.RealmAccess.Roles = []string{"cliente"}
+		p.RealmAccess.Roles = roles
 		return p, nil
 	}}
 	calls := 0
@@ -145,4 +146,118 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 	if calls != 3 {
 		t.Fatal("unexpected provisioning calls", calls)
 	}
+	// The same already-issued identity must obey current standing, without
+	// losing authenticated access to its own profile.
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	setStanding := func(status string) {
+		t.Helper()
+		if _, err := db.Exec(`UPDATE standing.account SET status=$2,version=version+1 WHERE subject_id=$1`, userID, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStanding("suspended")
+	standingRequest := httptest.NewRequest("GET", "/api/user/me/standing", nil)
+	standingRequest.Header.Set("Authorization", "Bearer fixture")
+	standingResponse := httptest.NewRecorder()
+	router.ServeHTTP(standingResponse, standingRequest)
+	var view struct {
+		Status       string          `json:"status"`
+		Capabilities map[string]bool `json:"capabilities"`
+	}
+	if err := json.Unmarshal(standingResponse.Body.Bytes(), &view); err != nil || standingResponse.Code != 200 || view.Status != "suspended" {
+		t.Fatal("own standing unavailable", standingResponse.Body.String(), err)
+	}
+	if view.Capabilities["publish_listing"] || !view.Capabilities["access_safety"] || !view.Capabilities["request_privacy"] || !view.Capabilities["cancel_own_booking"] {
+		t.Fatal("incorrect commercial/protective capabilities", view)
+	}
+
+	send("PUT", string(raw), 403)
+	send("GET", "", 200)
+	if calls != 3 {
+		t.Fatal("restricted request reached identity provisioner")
+	}
+	setStanding("active")
+	send("PUT", string(raw), 200)
+	// Change authority after profile writes, while the transaction is still
+	// open. The final version check must roll back all local changes.
+	p.Description = "Este cambio concurrente no debe quedar publicado"
+	changed, _ := json.Marshal(p)
+	s.grantCompa = func(context.Context, string) error {
+		setStanding("banned")
+		return nil
+	}
+	send("PUT", string(changed), 403)
+	var description string
+	if err := db.QueryRow(`SELECT descripcion FROM compa_perfil WHERE usuario_id=$1`, userID).Scan(&description); err != nil {
+		t.Fatal(err)
+	}
+	if description != validCompaProfile().Description {
+		t.Fatal("standing race committed profile changes", description)
+	}
+	send("GET", "", 200)
+
+	// The older aliases must not bypass the same authority by using the compa
+	// role from an otherwise valid token.
+	roles = []string{"cliente", "compa"}
+	var profileID string
+	if err := db.QueryRow(`SELECT id::text FROM compa_perfil WHERE usuario_id=$1`, userID).Scan(&profileID); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []struct{ path, body string }{
+		{"/api/user/compas", `{"descripcion":"Legacy bypass attempt","tarifa_hora":1}`},
+		{"/api/user/compas/" + profileID + "/skills", `{"skills":["bypass"]}`},
+	} {
+		req := httptest.NewRequest("POST", endpoint.path, strings.NewReader(endpoint.body))
+		req.Header.Set("Authorization", "Bearer fixture")
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, req)
+		if response.Code != 403 {
+			t.Fatal("legacy alias bypassed standing", endpoint.path, response.Code, response.Body.String())
+		}
+	}
+
+	// Public visibility is filtered in SQL before pagination. Owners can still
+	// read their private profile and retained photo through authenticated routes.
+	assertVisible := func(want bool) {
+		t.Helper()
+		cards, err := s.repo.ListCompas(context.Background(), 1, 0, skill, true)
+		if err != nil || (len(cards) == 1) != want {
+			t.Fatal("catalog standing mismatch", len(cards), want, err)
+		}
+		for _, endpoint := range []string{"/api/user/compas/" + userID, "/api/user/compas/" + userID + "/reviews"} {
+			req := httptest.NewRequest("GET", endpoint, nil)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, req)
+			wantStatus := 404
+			if want {
+				wantStatus = 200
+			}
+			if response.Code != wantStatus {
+				t.Fatal("public visibility mismatch", endpoint, response.Code, response.Body.String())
+			}
+		}
+	}
+	assertVisible(false)
+	setStanding("active")
+	assertVisible(true)
+	if _, err := db.Exec(`INSERT INTO standing.restriction(subject_id,capability,starts_at,ends_at) VALUES($1,'publish_listing',now()-interval '1 minute',now()+interval '1 minute')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	assertVisible(false)
+	if _, err := db.Exec(`UPDATE standing.restriction SET ends_at=now()-interval '1 second' WHERE subject_id=$1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	assertVisible(true)
+	setStanding("banned")
+	key := strings.Repeat("a", 32) + ".jpg"
+	if _, err := db.Exec(`UPDATE usuario SET foto_clave=$2 WHERE id=$1`, userID, key); err != nil {
+		t.Fatal(err)
+	}
+	photo := httptest.NewRecorder()
+	router.ServeHTTP(photo, httptest.NewRequest("GET", "/api/user/media/profile/"+key, nil))
+	if photo.Code != 404 {
+		t.Fatal("banned photo remains public", photo.Code)
+	}
+
 }

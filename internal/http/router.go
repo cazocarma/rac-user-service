@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"github.com/cazocarma/rac-platform/standing"
 
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ func (s *Server) Router() *gin.Engine {
 
 		// Profile (requires Authorization Bearer)
 		api.GET("/me", s.security.Require("cliente"), s.me)
+		api.GET("/me/standing", s.security.Require("cliente"), s.ownStanding)
 		api.PUT("/me", s.security.Require("cliente"), s.saveMe)
 		api.GET("/me/photo", s.security.Require("cliente"), s.ownPhoto)
 		api.PUT("/me/photo", s.security.Require("cliente"), s.savePhoto)
@@ -76,26 +78,28 @@ func (s *Server) Router() *gin.Engine {
 }
 
 func (s *Server) listCompas(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 	skill := strings.TrimSpace(c.Query("skill"))
-	res, err := s.repo.ListCompas(c, limit, offset, skill)
+	res, err := s.repo.ListCompas(c, limit, offset, skill, standingEnabled())
 	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.JSON(503, gin.H{"error": "catalog_unavailable"})
 		return
 	}
 	c.JSON(200, res)
 }
 
 func (s *Server) getCompaByID(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	id := c.Param("id")
-	item, err := s.repo.GetCompaByID(c, id)
+	item, err := s.repo.GetCompaByID(c, id, standingEnabled())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(404, gin.H{"error": "not_found"})
 			return
 		}
-		c.JSON(500, gin.H{"error": err.Error()})
+		c.JSON(503, gin.H{"error": "catalog_unavailable"})
 		return
 	}
 	c.JSON(200, item)
@@ -138,7 +142,22 @@ func (s *Server) addSkillsToCompa(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "no_skills"})
 		return
 	}
-	if err := s.repo.AddSkillsToPerfil(c, id, req.Skills); err != nil {
+	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: p.Subject, Capability: standing.PublishListing}, standing.Requirement{Subject: owner, Capability: standing.PublishListing})
+	defer cancel()
+	if !ok {
+		return
+	}
+	check := func(ctx context.Context) error {
+		if permit == nil {
+			return nil
+		}
+		return permit.Check(ctx)
+	}
+	if err := s.repo.AddSkillsToPerfil(ctx, id, req.Skills, check); err != nil {
+		if errors.Is(err, standing.ErrDenied) || errors.Is(err, standing.ErrUnavailable) {
+			reviewStandingFailure(c, err)
+			return
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
@@ -245,6 +264,11 @@ func (s *Server) me(c *gin.Context) {
 }
 func (s *Server) publishCompa(c *gin.Context) {
 	p := platform.Principal(c)
+	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: p.Subject, Capability: standing.PublishListing})
+	defer cancel()
+	if !ok {
+		return
+	}
 	var body struct {
 		Descripcion string  `json:"descripcion"`
 		Tarifa      float64 `json:"tarifa_hora"`
@@ -254,11 +278,27 @@ func (s *Server) publishCompa(c *gin.Context) {
 		return
 	}
 	var id string
-	err := s.db.QueryRowContext(c, `INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
+		return
+	}
+	defer tx.Rollback()
+	err = tx.QueryRowContext(ctx, `INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora)
  SELECT gen_random_uuid(),id,$2,$3 FROM usuario WHERE keycloak_id=$1
  ON CONFLICT(usuario_id) DO UPDATE SET descripcion=EXCLUDED.descripcion,tarifa_hora=EXCLUDED.tarifa_hora RETURNING id::text`, p.Subject, body.Descripcion, body.Tarifa).Scan(&id)
 	if err != nil {
 		c.JSON(409, gin.H{"error": "profile_required"})
+		return
+	}
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			reviewStandingFailure(c, err)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
 	}
 	c.JSON(200, gin.H{"id": id})

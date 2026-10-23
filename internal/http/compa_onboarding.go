@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/gin-gonic/gin"
 	"io"
@@ -131,7 +132,11 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	ctx := c.Request.Context()
+	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: principal.Subject, Capability: standing.PublishListing})
+	defer cancel()
+	if !ok {
+		return
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
@@ -182,6 +187,12 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 	}
 	// Remote role assignment is idempotent. A failed commit can be retried safely;
 	// no profile is visible before commit, and only the free compa role was granted.
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			reviewStandingFailure(c, err)
+			return
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
