@@ -60,36 +60,43 @@ func decode(reader io.Reader, value any) error {
 }
 
 func (c *Client) Load(ctx context.Context, subject string) (standing.Snapshot, error) {
+	var result response
+	if err := c.exchange(ctx, c.endpoint, subject, &result); err != nil || result.Subject != subject || result.Snapshot.Version == 0 || len(result.Snapshot.Restrictions) > 50 {
+		return standing.Snapshot{}, standing.ErrUnavailable
+	}
+	return result.Snapshot, nil
+}
+
+func (c *Client) exchange(ctx context.Context, endpoint, subject string, result any) error {
 	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 	if subject == "" || len(subject) > 64 {
-		return standing.Snapshot{}, standing.ErrUnavailable
+		return standing.ErrUnavailable
 	}
 	token, err := c.token(ctx)
 	if err != nil || token == "" {
-		return standing.Snapshot{}, standing.ErrUnavailable
+		return standing.ErrUnavailable
 	}
 	body, _ := json.Marshal(request{subject})
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return standing.Snapshot{}, standing.ErrUnavailable
+		return standing.ErrUnavailable
 	}
 	r.Header.Set("Authorization", "Bearer "+token)
 	r.Header.Set("Content-Type", "application/json")
 	reply, err := c.client.Do(r)
 	if err != nil {
-		return standing.Snapshot{}, standing.ErrUnavailable
+		return standing.ErrUnavailable
 	}
 	defer reply.Body.Close()
 	if reply.StatusCode != http.StatusOK {
-		return standing.Snapshot{}, standing.ErrUnavailable
+		return standing.ErrUnavailable
 	}
-	var result response
 	data, readErr := io.ReadAll(io.LimitReader(reply.Body, maxBody+1))
-	if readErr != nil || len(data) > maxBody || decode(bytes.NewReader(data), &result) != nil || result.Subject != subject || result.Snapshot.Version == 0 || len(result.Snapshot.Restrictions) > 50 {
-		return standing.Snapshot{}, standing.ErrUnavailable
+	if readErr != nil || len(data) > maxBody || decode(bytes.NewReader(data), result) != nil {
+		return standing.ErrUnavailable
 	}
-	return result.Snapshot, nil
+	return nil
 }
 
 func (c *Client) LatestVersion(ctx context.Context, subject string) (uint64, error) {

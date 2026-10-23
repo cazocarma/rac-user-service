@@ -43,15 +43,24 @@ func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
 	if keys == "" {
 		keys = os.Getenv("OIDC_JWKS_URL")
 	}
-	auth, err := NewStandingReader(StandingReaderConfig{
+	readerConfig := StandingReaderConfig{
 		Issuer: os.Getenv("OIDC_ISSUER"), JWKS: keys, Audience: "rac-standing",
 		Subjects: subjects, AllowDevelopmentHTTP: os.Getenv("RAC_ENV") == "dev",
-	})
+	}
+	auth, err := NewStandingReader(readerConfig)
+	if err != nil {
+		return nil, err
+	}
+	// Chat can check its participants, but cannot crawl recovery history.
+	readerConfig.Subjects = map[string]string{"rac-match-standing": subjects["rac-match-standing"]}
+	replayAuth, err := NewStandingReader(readerConfig)
 	if err != nil {
 		return nil, err
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/internal/standing", transport.Handler(standingdb.New(db), auth))
+	mux.Handle("/internal/standing/replay", transport.ReplayHandler(standingdb.New(db), replayAuth))
+	mux.Handle("/internal/standing/replay/events", transport.ReplayPageHandler(standingdb.New(db), replayAuth))
 	return &http.Server{Addr: ":8082", Handler: mux, ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 32768}, nil

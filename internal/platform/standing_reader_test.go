@@ -8,6 +8,9 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +108,48 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	}
 	if auth(nil) == nil || auth(httptest.NewRequest("POST", "/", nil)) == nil {
 		t.Fatal("missing request/token accepted")
+	}
+	// A correctly signed, provisioned chat reader can check participants but
+	// cannot use the separate history/recovery surface reserved for match.
+	bindings := map[string]string{"rac-match-standing": "machine-subject", "rac-chat-standing": "chat-subject"}
+	general, err := NewStandingReader(StandingReaderConfig{Issuer: issuer, JWKS: jwks.URL, Audience: "rac-standing", Subjects: bindings, AllowDevelopmentHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := jwt.MapClaims{"iss": issuer, "aud": "rac-standing", "sub": "chat-subject", "azp": "rac-chat-standing", "typ": "Bearer", "iat": time.Now().Unix(), "exp": time.Now().Add(300 * time.Second).Unix(), "resource_access": map[string]any{"rac-standing": map[string]any{"roles": []string{"standing.read"}}}}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = "reader"
+	raw, err := token.SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("POST", "/internal/standing", nil)
+	request.Header.Set("Authorization", "Bearer "+raw)
+	if err := general(request); err != nil {
+		t.Fatal("valid chat reader rejected before purpose restriction", err)
+	}
+	file := filepath.Join(t.TempDir(), "subjects.json")
+	data, _ := json.Marshal(bindings)
+	if err := os.WriteFile(file, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	t.Setenv("STANDING_SUBJECTS_FILE", file)
+	t.Setenv("OIDC_ISSUER", issuer)
+	t.Setenv("STANDING_JWKS_URL", jwks.URL)
+	t.Setenv("RAC_ENV", "dev")
+	server, err := StandingAuthorityFromEnvironment(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/internal/standing/replay", "/internal/standing/replay/events"} {
+		r := httptest.NewRequest("POST", path, strings.NewReader(`{"subject":"10000000-0000-4000-8000-000000000001","after":1}`))
+		r.Header.Set("Authorization", "Bearer "+raw)
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, r)
+		if w.Code != 401 {
+			t.Fatal("chat reader can crawl standing history", path, w.Code)
+		}
 	}
 }
 
