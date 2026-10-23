@@ -8,6 +8,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -66,7 +67,25 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 		db.Exec(`DELETE FROM usuario WHERE id=$1`, userID)
 		db.Exec(`DELETE FROM skill WHERE name=$1`, skill)
 	}()
-	s := New(db, config.Config{})
+	// Fixtures and cleanup use the disposable database owner. The HTTP handler
+	// must run with the same limited privileges as backend-user in Compose.
+	connection, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := connection.Query()
+	options.Set("options", "-c role=rac_user")
+	connection.RawQuery = options.Encode()
+	serviceDB, err := sql.Open("postgres", connection.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serviceDB.Close()
+	var role string
+	if err := serviceDB.QueryRow(`SELECT current_user`).Scan(&role); err != nil || role != "rac_user" {
+		t.Fatalf("scoped service connection unavailable: %s %v", role, err)
+	}
+	s := New(serviceDB, config.Config{})
 	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: sub}
 		p.RealmAccess.Roles = []string{"cliente"}
@@ -103,6 +122,9 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 		t.Fatal("unknown fields reached provisioner")
 	}
 	send("PUT", string(raw), 503)
+	if calls != 1 {
+		t.Fatal("onboarding failed before reaching provisioner with scoped DB role")
+	}
 	send("GET", "", 404)
 	var count int
 	db.QueryRow(`SELECT count(*) FROM compa_availability WHERE compa_id=$1`, userID).Scan(&count)
