@@ -1,7 +1,8 @@
 FROM golang:1.27.2-alpine AS builder
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+COPY vendor ./vendor
+ENV GOPROXY=off GOSUMDB=off
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server && CGO_ENABLED=0 GOOS=linux go build -o migrate-photos ./cmd/migrate-photos
 

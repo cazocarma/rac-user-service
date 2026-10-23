@@ -13,7 +13,6 @@ server
 *.exe
 *.out
 *.test
-vendor/
 migrations/
 
 .env*

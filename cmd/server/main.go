@@ -9,6 +9,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/config"
 	httpapi "github.com/cazocarma/rac-user-service/internal/http"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
+	"github.com/cazocarma/rac-user-service/internal/platform"
 	_ "github.com/lib/pq"
 )
 
@@ -36,6 +37,17 @@ func main() {
 		log.Fatalf("[user-svc] cannot reach postgres: %v", err)
 	}
 
+	authority, err := platform.StandingAuthorityFromEnvironment(db)
+	if err != nil {
+		log.Fatal("invalid standing authority configuration")
+	}
+	if authority != nil {
+		go func() {
+			if err := authority.ListenAndServe(); err != nil {
+				log.Fatal("standing authority listener stopped")
+			}
+		}()
+	}
 	store, err := photostore.FromEnvironment()
 	if err != nil {
 		log.Fatal("invalid profile photo storage configuration")
