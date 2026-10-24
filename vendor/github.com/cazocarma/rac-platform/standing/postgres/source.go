@@ -20,7 +20,7 @@ func New(db Queryer) *Source { return &Source{db: db} }
 
 // One statement gives account and restrictions from the same committed snapshot.
 // Bind the verified OIDC subject through usuario, never caller-provided user IDs.
-const snapshotSQL = `SELECT a.status,a.version,r.capability,r.starts_at,r.ends_at
+const snapshotSQL = `SELECT a.status,a.version,r.capability,r.starts_at,r.ends_at,statement_timestamp()
  FROM standing.account a JOIN public.usuario u ON u.id=a.subject_id
  LEFT JOIN standing.restriction r ON r.subject_id=a.subject_id
  WHERE u.keycloak_id=$1 ORDER BY r.capability,r.starts_at`
@@ -41,13 +41,15 @@ func (s *Source) Load(ctx context.Context, subject string) (standing.Snapshot, e
 		var version uint64
 		var capability sql.NullString
 		var start, end sql.NullTime
-		if err := rows.Scan(&status, &version, &capability, &start, &end); err != nil {
+		var observed sql.NullTime
+		if err := rows.Scan(&status, &version, &capability, &start, &end, &observed); err != nil || !observed.Valid || observed.Time.IsZero() {
 			return standing.Snapshot{}, standing.ErrUnavailable
 		}
-		if found && (result.Status != status || result.Version != version) {
+		if found && (result.Status != status || result.Version != version || !result.ObservedAt.Equal(observed.Time)) {
 			return standing.Snapshot{}, standing.ErrUnavailable
 		}
 		result.Status, result.Version, found = status, version, true
+		result.ObservedAt = observed.Time
 		if capability.Valid {
 			if !start.Valid {
 				return standing.Snapshot{}, standing.ErrUnavailable

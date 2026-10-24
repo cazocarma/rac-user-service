@@ -11,12 +11,13 @@ const MaxLease = 2 * time.Second
 type Lease struct {
 	snapshot Snapshot
 	start    time.Time
+	received time.Time
 	end      time.Time
 }
 
 func NewLease(s Snapshot, requestStarted, received time.Time) (Lease, bool) {
 	end := requestStarted.Add(MaxLease)
-	if requestStarted.IsZero() || received.Before(requestStarted) || !received.Before(end) ||
+	if requestStarted.IsZero() || s.ObservedAt.IsZero() || received.Before(requestStarted) || !received.Before(end) ||
 		s.Version == 0 || (s.Status != Active && s.Status != Restricted && s.Status != Suspended && s.Status != Banned) {
 		return Lease{}, false
 	}
@@ -28,7 +29,7 @@ func NewLease(s Snapshot, requestStarted, received time.Time) (Lease, bool) {
 			s.Restrictions[i].EndsAt = &endCopy
 		}
 	}
-	return Lease{snapshot: s, start: requestStarted, end: end}, true
+	return Lease{snapshot: s, start: requestStarted, received: received, end: end}, true
 }
 
 // Authorize must be called again at commit. A newer observed version invalidates
@@ -37,8 +38,14 @@ func (l Lease) Authorize(c Capability, now time.Time, observedVersion uint64) De
 	if protective(c) {
 		return Evaluate(l.snapshot, c, now)
 	}
-	if now.Before(l.start) || !now.Before(l.end) || observedVersion > l.snapshot.Version {
+	if l.snapshot.ObservedAt.IsZero() || now.Before(l.received) || !now.Before(l.end) || observedVersion > l.snapshot.Version {
 		return Decision{Version: l.snapshot.Version}
 	}
-	return Evaluate(l.snapshot, c, now)
+	// The authority sampled its time somewhere between request start and
+	// response receipt. Local monotonic elapsed durations bound its current
+	// time without trusting the caller's UTC offset. Deny if a restriction
+	// overlaps any part of this interval; network time never grants permission.
+	return evaluateWindow(l.snapshot, c,
+		l.snapshot.ObservedAt.Add(now.Sub(l.received)),
+		l.snapshot.ObservedAt.Add(now.Sub(l.start)))
 }

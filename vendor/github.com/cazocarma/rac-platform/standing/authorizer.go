@@ -48,7 +48,7 @@ func (a AuthorityAuthorizer) Authorize(ctx context.Context, subject string, capa
 		return Decision{}, ErrUnavailable
 	}
 	version, err := a.Source.LatestVersion(ctx, subject)
-	if err != nil || version == 0 || ctx.Err() != nil {
+	if err != nil || version < snapshot.Version || ctx.Err() != nil {
 		return Decision{}, ErrUnavailable
 	}
 	return lease.Authorize(capability, a.Now(), version), nil

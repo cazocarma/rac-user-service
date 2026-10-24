@@ -61,7 +61,7 @@ func decode(reader io.Reader, value any) error {
 
 func (c *Client) Load(ctx context.Context, subject string) (standing.Snapshot, error) {
 	var result response
-	if err := c.exchange(ctx, c.endpoint, subject, &result); err != nil || result.Subject != subject || result.Snapshot.Version == 0 || len(result.Snapshot.Restrictions) > 50 {
+	if err := c.exchange(ctx, c.endpoint, subject, &result); err != nil || result.Subject != subject || result.Snapshot.Version == 0 || result.Snapshot.ObservedAt.IsZero() || len(result.Snapshot.Restrictions) > 50 {
 		return standing.Snapshot{}, standing.ErrUnavailable
 	}
 	return result.Snapshot, nil
@@ -136,7 +136,7 @@ func Handler(source standing.Source, authenticate func(*http.Request) error) htt
 			return
 		}
 		s, err := source.Load(r.Context(), in.Subject)
-		if err != nil || s.Version == 0 {
+		if err != nil || s.Version == 0 || s.ObservedAt.IsZero() {
 			http.Error(w, "unavailable", 503)
 			return
 		}

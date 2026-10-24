@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-platform/standing/transport"
@@ -15,7 +16,7 @@ import (
 type fixtureStandingSource struct{}
 
 func (fixtureStandingSource) Load(context.Context, string) (standing.Snapshot, error) {
-	return standing.Snapshot{Version: 1, Status: standing.Active}, nil
+	return standing.Snapshot{Version: 1, Status: standing.Active, ObservedAt: time.Now()}, nil
 }
 func (fixtureStandingSource) LatestVersion(context.Context, string) (uint64, error) { return 1, nil }
 

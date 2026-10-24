@@ -63,9 +63,15 @@ func (s *Server) ownStanding(c *gin.Context) {
 		c.JSON(200, gin.H{"enforcement_enabled": false})
 		return
 	}
+	started := time.Now()
 	snapshot, err := standingdb.New(s.db).Load(c.Request.Context(), platform.Principal(c).Subject)
 	if err != nil {
 		reviewStandingFailure(c, err)
+		return
+	}
+	lease, ok := standing.NewLease(snapshot, started, time.Now())
+	if !ok {
+		reviewStandingFailure(c, standing.ErrUnavailable)
 		return
 	}
 	capabilities := make(map[standing.Capability]bool)
@@ -76,7 +82,7 @@ func (s *Server) ownStanding(c *gin.Context) {
 		standing.Appeal, standing.AccessSafety, standing.CancelOwnBooking,
 		standing.RequestPrivacy, standing.RecoverAccount, standing.AcceptDocuments,
 	} {
-		capabilities[capability] = standing.Evaluate(snapshot, capability, now).Allowed
+		capabilities[capability] = lease.Authorize(capability, now, snapshot.Version).Allowed
 	}
 	c.JSON(200, gin.H{"enforcement_enabled": true, "status": snapshot.Status, "version": snapshot.Version, "capabilities": capabilities})
 }
