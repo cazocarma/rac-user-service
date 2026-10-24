@@ -1,12 +1,9 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
-	"time"
 
 	"github.com/cazocarma/rac-platform/standing"
 )
@@ -24,29 +21,7 @@ func (c *Client) Page(ctx context.Context, subject string, after uint64) (standi
 	if !standing.ValidAccountID(subject) {
 		return page, standing.ErrUnavailable
 	}
-	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	token, err := c.token(ctx)
-	if err != nil || token == "" {
-		return page, standing.ErrUnavailable
-	}
-	body, _ := json.Marshal(pageRequest{subject, after})
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/replay/events", bytes.NewReader(body))
-	if err != nil {
-		return page, standing.ErrUnavailable
-	}
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("Content-Type", "application/json")
-	reply, err := c.client.Do(r)
-	if err != nil {
-		return page, standing.ErrUnavailable
-	}
-	defer reply.Body.Close()
-	if reply.StatusCode != 200 {
-		return page, standing.ErrUnavailable
-	}
-	data, err := io.ReadAll(io.LimitReader(reply.Body, maxReplayPage+1))
-	if err != nil || len(data) > maxReplayPage || decode(bytes.NewReader(data), &page) != nil || page.Subject != subject || page.After != after || !page.Valid() {
+	if err := c.exchangePayload(ctx, c.endpoint+"/replay/events", pageRequest{subject, after}, maxReplayPage, &page); err != nil || page.Subject != subject || page.After != after || !page.Valid() {
 		return standing.ReplayPage{}, standing.ErrUnavailable
 	}
 	return page, nil

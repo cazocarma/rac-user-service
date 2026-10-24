@@ -83,7 +83,7 @@ func TestStandingAuthorityRolloutConfiguration(t *testing.T) {
 		t.Fatal("missing bindings accepted")
 	}
 	file := filepath.Join(t.TempDir(), "subjects.json")
-	if err := os.WriteFile(file, []byte(`{"rac-match-standing":"machine-subject"}`), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(`{"rac-match-standing":"machine-subject","rac-chat-standing":"chat-subject","rac-alert-standing":"alert-subject"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("STANDING_SUBJECTS_FILE", file)

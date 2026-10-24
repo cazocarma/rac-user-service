@@ -39,21 +39,37 @@ func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
 	if d.Decode(&subjects) != nil || d.Decode(new(any)) != io.EOF {
 		return nil, errStandingReader
 	}
+	if len(subjects) != 3 {
+		return nil, errStandingReader
+	}
+	seen := map[string]bool{}
+	for _, client := range []string{"rac-match-standing", "rac-chat-standing", "rac-alert-standing"} {
+		subject := subjects[client]
+		if subject == "" || seen[subject] {
+			return nil, errStandingReader
+		}
+		seen[subject] = true
+	}
 	keys := os.Getenv("STANDING_JWKS_URL")
 	if keys == "" {
 		keys = os.Getenv("OIDC_JWKS_URL")
 	}
 	readerConfig := StandingReaderConfig{
 		Issuer: os.Getenv("OIDC_ISSUER"), JWKS: keys, Audience: "rac-standing",
-		Subjects: subjects, AllowDevelopmentHTTP: os.Getenv("RAC_ENV") == "dev",
+		Subjects: map[string]string{"rac-match-standing": subjects["rac-match-standing"], "rac-chat-standing": subjects["rac-chat-standing"]}, AllowDevelopmentHTTP: os.Getenv("RAC_ENV") == "dev",
 	}
 	auth, err := NewStandingReader(readerConfig)
 	if err != nil {
 		return nil, err
 	}
 	// Chat can check its participants, but cannot crawl recovery history.
-	readerConfig.Subjects = map[string]string{"rac-match-standing": subjects["rac-match-standing"]}
+	readerConfig.Subjects = map[string]string{"rac-match-standing": subjects["rac-match-standing"], "rac-alert-standing": subjects["rac-alert-standing"]}
 	replayAuth, err := NewStandingReader(readerConfig)
+	if err != nil {
+		return nil, err
+	}
+	readerConfig.Subjects = map[string]string{"rac-alert-standing": subjects["rac-alert-standing"]}
+	discoveryAuth, err := NewStandingReader(readerConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -61,6 +77,7 @@ func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
 	mux.Handle("/internal/standing", transport.Handler(standingdb.New(db), auth))
 	mux.Handle("/internal/standing/replay", transport.ReplayHandler(standingdb.New(db), replayAuth))
 	mux.Handle("/internal/standing/replay/events", transport.ReplayPageHandler(standingdb.New(db), replayAuth))
+	mux.Handle("/internal/standing/replay/accounts", transport.DiscoveryHandler(standingdb.New(db), discoveryAuth))
 	return &http.Server{Addr: ":8082", Handler: mux, ReadHeaderTimeout: 2 * time.Second,
 		ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second,
 		MaxHeaderBytes: 32768}, nil

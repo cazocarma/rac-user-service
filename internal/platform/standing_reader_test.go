@@ -111,7 +111,7 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	}
 	// A correctly signed, provisioned chat reader can check participants but
 	// cannot use the separate history/recovery surface reserved for match.
-	bindings := map[string]string{"rac-match-standing": "machine-subject", "rac-chat-standing": "chat-subject"}
+	bindings := map[string]string{"rac-match-standing": "machine-subject", "rac-chat-standing": "chat-subject", "rac-alert-standing": "alert-subject"}
 	general, err := NewStandingReader(StandingReaderConfig{Issuer: issuer, JWKS: jwks.URL, Audience: "rac-standing", Subjects: bindings, AllowDevelopmentHTTP: true})
 	if err != nil {
 		t.Fatal(err)
@@ -142,13 +142,37 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/internal/standing/replay", "/internal/standing/replay/events"} {
+	for _, path := range []string{"/internal/standing/replay", "/internal/standing/replay/events", "/internal/standing/replay/accounts"} {
 		r := httptest.NewRequest("POST", path, strings.NewReader(`{"subject":"10000000-0000-4000-8000-000000000001","after":1}`))
 		r.Header.Set("Authorization", "Bearer "+raw)
 		w := httptest.NewRecorder()
 		server.Handler.ServeHTTP(w, r)
 		if w.Code != 401 {
 			t.Fatal("chat reader can crawl standing history", path, w.Code)
+		}
+	}
+	for _, client := range []struct {
+		id, subject string
+		paths       map[string]int
+	}{
+		{"rac-match-standing", "machine-subject", map[string]int{"/internal/standing": 405, "/internal/standing/replay/events": 405, "/internal/standing/replay/accounts": 401}},
+		{"rac-alert-standing", "alert-subject", map[string]int{"/internal/standing": 401, "/internal/standing/replay/events": 405, "/internal/standing/replay/accounts": 405}},
+	} {
+		claims["azp"], claims["sub"] = client.id, client.subject
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		token.Header["kid"] = "reader"
+		raw, err := token.SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for path, want := range client.paths {
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("Authorization", "Bearer "+raw)
+			w := httptest.NewRecorder()
+			server.Handler.ServeHTTP(w, r)
+			if w.Code != want {
+				t.Fatal("standing purpose isolation", client.id, path, w.Code, want)
+			}
 		}
 	}
 }

@@ -68,16 +68,23 @@ func (c *Client) Load(ctx context.Context, subject string) (standing.Snapshot, e
 }
 
 func (c *Client) exchange(ctx context.Context, endpoint, subject string, result any) error {
-	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
 	if subject == "" || len(subject) > 64 {
 		return standing.ErrUnavailable
 	}
+	return c.exchangePayload(ctx, endpoint, request{subject}, maxBody, result)
+}
+
+func (c *Client) exchangePayload(ctx context.Context, endpoint string, input any, limit int, result any) error {
+	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
 	token, err := c.token(ctx)
 	if err != nil || token == "" {
 		return standing.ErrUnavailable
 	}
-	body, _ := json.Marshal(request{subject})
+	body, err := json.Marshal(input)
+	if err != nil {
+		return standing.ErrUnavailable
+	}
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return standing.ErrUnavailable
@@ -92,8 +99,8 @@ func (c *Client) exchange(ctx context.Context, endpoint, subject string, result 
 	if reply.StatusCode != http.StatusOK {
 		return standing.ErrUnavailable
 	}
-	data, readErr := io.ReadAll(io.LimitReader(reply.Body, maxBody+1))
-	if readErr != nil || len(data) > maxBody || decode(bytes.NewReader(data), result) != nil {
+	data, readErr := io.ReadAll(io.LimitReader(reply.Body, int64(limit)+1))
+	if readErr != nil || len(data) > limit || decode(bytes.NewReader(data), result) != nil {
 		return standing.ErrUnavailable
 	}
 	return nil
