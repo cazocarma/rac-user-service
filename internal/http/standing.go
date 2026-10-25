@@ -39,7 +39,7 @@ func (s *Server) userPermit(c *gin.Context, requirements ...standing.Requirement
 	if !standingEnabled() {
 		return ctx, nil, func() {}, true
 	}
-	bounded, p, cancel, err := standing.Acquire(ctx, standingdb.New(s.db), requirements...)
+	bounded, p, cancel, err := standing.Acquire(ctx, s.standingCache, requirements...)
 	if err != nil {
 		reviewStandingFailure(c, err)
 		return ctx, nil, cancel, false

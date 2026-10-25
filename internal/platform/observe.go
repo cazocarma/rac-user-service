@@ -9,6 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-func Observe(r *gin.Engine, service string) {
+func Observe(r *gin.Engine, service string, extras ...func(io.Writer)) {
 	registry := prometheus.NewRegistry()
 	count := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "rac_http_requests_total", Help: "HTTP requests by route"}, []string{"service", "method", "route", "status"})
 	duration := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "rac_http_request_duration_seconds", Help: "HTTP latency", Buckets: prometheus.DefBuckets}, []string{"service", "method", "route"})
@@ -40,7 +41,17 @@ func Observe(r *gin.Engine, service string) {
 		duration.WithLabelValues(service, c.Request.Method, route).Observe(time.Since(start).Seconds())
 		logger.Info("http_request", "service", service, "environment", os.Getenv("RAC_ENV"), "method", c.Request.Method, "route", route, "status", c.Writer.Status(), "duration_ms", time.Since(start).Milliseconds(), "request_id", requestID)
 	})
-	r.GET("/metrics", gin.WrapH(promhttp.HandlerFor(registry, promhttp.HandlerOpts{})))
+	// Extra text metrics share the same response. Keep it uncompressed so a
+	// negotiated gzip stream cannot be followed by uncompressed SDK metrics.
+	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{DisableCompression: true})
+	r.GET("/metrics", func(c *gin.Context) {
+		handler.ServeHTTP(c.Writer, c.Request)
+		for _, extra := range extras {
+			if extra != nil {
+				extra(c.Writer)
+			}
+		}
+	})
 }
 func Health(r *gin.Engine, db *sql.DB, dependency func(context.Context) error) {
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })

@@ -46,6 +46,10 @@ func (p *Permit) Version(subject string) (uint64, bool) {
 // Lock waits and remote reads consume the same budget; Check never renews it.
 func Acquire(ctx context.Context, source Source, requirements ...Requirement) (context.Context, *Permit, context.CancelFunc, error) {
 	started := time.Now()
+	hot := false
+	if observer, ok := source.(acquisitionObserver); ok {
+		defer func() { observer.ObserveAcquire(time.Since(started), hot) }()
+	}
 	ctx, cancel := context.WithDeadline(ctx, started.Add(MaxLease))
 	fail := func(err error) (context.Context, *Permit, context.CancelFunc, error) {
 		cancel()
@@ -62,29 +66,30 @@ func Acquire(ctx context.Context, source Source, requirements ...Requirement) (c
 	p := &Permit{source: source, requirements: append([]Requirement(nil), requirements...),
 		leases: make([]Lease, len(requirements)), versions: make([]uint64, len(requirements)), deadline: started.Add(MaxLease)}
 	errors := make([]error, len(requirements))
+	hits := make([]bool, len(requirements))
 	var wg sync.WaitGroup
 	for i, requirement := range p.requirements {
 		wg.Add(1)
 		go func(i int, r Requirement) {
 			defer wg.Done()
-			snapshot, err := source.Load(ctx, r.Subject)
+			lease, hit, err := sourceLease(ctx, source, r.Subject, r.Capability, started, time.Now)
 			if err != nil {
 				errors[i] = ErrUnavailable
 				return
 			}
-			lease, ok := NewLease(snapshot, started, time.Now())
-			if !ok {
-				errors[i] = ErrUnavailable
-				return
-			}
-			if !lease.Authorize(r.Capability, time.Now(), snapshot.Version).Allowed {
+			hits[i] = hit
+			if !lease.Authorize(r.Capability, time.Now(), lease.snapshot.Version).Allowed {
 				errors[i] = ErrDenied
 				return
 			}
-			p.leases[i], p.versions[i] = lease, snapshot.Version
+			p.leases[i], p.versions[i] = lease, lease.snapshot.Version
 		}(i, requirement)
 	}
 	wg.Wait()
+	hot = true
+	for _, hit := range hits {
+		hot = hot && hit
+	}
 	if ctx.Err() != nil {
 		return fail(ErrUnavailable)
 	}
@@ -93,12 +98,31 @@ func Acquire(ctx context.Context, source Source, requirements ...Requirement) (c
 			return fail(err)
 		}
 	}
+	// Cached leases may be older than this operation. SQL lock waits and the
+	// final authority check must use the earliest ORIGINAL lease deadline.
+	for _, lease := range p.leases {
+		if lease.end.Before(p.deadline) {
+			p.deadline = lease.end
+		}
+	}
+	if p.deadline.Before(started.Add(MaxLease)) {
+		parentCancel := cancel
+		shorter, shortCancel := context.WithDeadline(ctx, p.deadline)
+		ctx = shorter
+		cancel = func() { shortCancel(); parentCancel() }
+	}
 	return ctx, p, cancel, nil
 }
 
 // Check fails closed on unavailable/regressed authority or any new version.
 // The caller must not perform further work between this check and SQL Commit.
 func (p *Permit) Check(ctx context.Context) error {
+	started := time.Now()
+	if p != nil {
+		if observer, ok := p.source.(checkObserver); ok {
+			defer func() { observer.ObserveCheck(time.Since(started)) }()
+		}
+	}
 	if p == nil || ctx.Err() != nil || !time.Now().Before(p.deadline) {
 		return ErrUnavailable
 	}

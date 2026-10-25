@@ -16,8 +16,8 @@ type Source interface {
 	LatestVersion(context.Context, string) (uint64, error)
 }
 
-// AuthorityAuthorizer intentionally performs a fresh authority lookup. A future
-// cache may reuse Lease, but must preserve the same expiry and version checks.
+// AuthorityAuthorizer may acquire an original bounded lease from LeasedSource,
+// but always confirms its version through the authority before deciding.
 type AuthorityAuthorizer struct {
 	Source Source
 	Now    func() time.Time
@@ -39,16 +39,12 @@ func (a AuthorityAuthorizer) Authorize(ctx context.Context, subject string, capa
 		return Decision{}, ErrUnavailable
 	}
 	started := a.Now()
-	snapshot, err := a.Source.Load(ctx, subject)
+	lease, _, err := sourceLease(ctx, a.Source, subject, capability, started, a.Now)
 	if err != nil {
 		return Decision{}, ErrUnavailable
 	}
-	lease, ok := NewLease(snapshot, started, a.Now())
-	if !ok {
-		return Decision{}, ErrUnavailable
-	}
 	version, err := a.Source.LatestVersion(ctx, subject)
-	if err != nil || version < snapshot.Version || ctx.Err() != nil {
+	if err != nil || version < lease.snapshot.Version || ctx.Err() != nil {
 		return Decision{}, ErrUnavailable
 	}
 	return lease.Authorize(capability, a.Now(), version), nil

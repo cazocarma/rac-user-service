@@ -107,6 +107,14 @@ func (s *Server) savePhoto(c *gin.Context) {
 		return
 	}
 	key := hex.EncodeToString(random[:]) + ".jpg"
+	// Acquisition may reuse a bounded lease. Confirm fresh authority before
+	// external object storage as well as before publishing its DB reference.
+	if permit != nil {
+		if err = permit.Check(ctx); err != nil {
+			reviewStandingFailure(c, err)
+			return
+		}
+	}
 	if err = s.photos().Put(ctx, key, normalized); err != nil {
 		// An uncertain remote write may leave an unreachable object. Never change
 		// the DB pointer on failure; cleanup can be retried separately.

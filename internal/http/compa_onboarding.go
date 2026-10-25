@@ -180,6 +180,14 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 		return
 	}
 	if !principal.HasRole("compa") {
+		// A cached acquisition is provisional; confirm current authority before
+		// assigning an external role, then recheck again before the DB commit.
+		if permit != nil {
+			if err = permit.Check(ctx); err != nil {
+				reviewStandingFailure(c, err)
+				return
+			}
+		}
 		if err = s.grantCompa(ctx, principal.Subject); err != nil {
 			c.JSON(503, gin.H{"error": "activation_unavailable"})
 			return

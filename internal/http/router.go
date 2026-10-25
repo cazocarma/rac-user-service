@@ -22,17 +22,18 @@ import (
 )
 
 type Server struct {
-	photoStore photostore.Store
-	photoDir   string
-	db         *sql.DB
-	repo       *repo.Repo
-	cfg        config.Config
-	security   *platform.Security
-	grantCompa func(context.Context, string) error
+	standingCache *standing.LeaseCache
+	photoStore    photostore.Store
+	photoDir      string
+	db            *sql.DB
+	repo          *repo.Repo
+	cfg           config.Config
+	security      *platform.Security
+	grantCompa    func(context.Context, string) error
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
-	return &Server{db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
+	return &Server{standingCache: standing.NewLeaseCache(standingdb.New(db)), db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
 }
 
 // SetPhotoStore configures persistence before Router is called.
@@ -41,7 +42,7 @@ func (s *Server) SetPhotoStore(store photostore.Store) { s.photoStore = store }
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
 
-	platform.Observe(r, "rac-user-service")
+	platform.Observe(r, "rac-user-service", standing.Metrics(s.standingCache))
 	var dependency func(context.Context) error
 	if s.photoStore != nil {
 		dependency = s.photoStore.Check
