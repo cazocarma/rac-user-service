@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/cazocarma/rac-platform/documents"
 	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/gin-gonic/gin"
@@ -177,6 +178,9 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 	if _, err = tx.ExecContext(ctx, `INSERT INTO compa_availability(compa_id,disponibilidad_json,zona_horaria) VALUES($1,$2::jsonb,COALESCE(NULLIF($3,''),'UTC'))
  ON CONFLICT(compa_id) DO UPDATE SET disponibilidad_json=EXCLUDED.disponibilidad_json,zona_horaria=COALESCE(NULLIF($3,''),compa_availability.zona_horaria),actualizado_en=now()`, userID, string(raw), body.TimeZone); err != nil {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
+		return
+	}
+	if !s.documentCommit(ctx, c, tx, documents.Compa, standing.PublishListing) {
 		return
 	}
 	if !principal.HasRole("compa") {

@@ -3,6 +3,8 @@ package httpapi
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/cazocarma/rac-platform/documents"
+	"github.com/cazocarma/rac-platform/standing"
 	"io"
 	"net/http"
 	"regexp"
@@ -89,6 +91,9 @@ func (s *Server) saveReview(c *gin.Context) {
 	inserted, err := result.RowsAffected()
 	if err != nil {
 		c.JSON(503, gin.H{"error": "review_unavailable"})
+		return
+	}
+	if !s.documentCommit(ctx, c, tx, documents.Client, standing.WriteReview) {
 		return
 	}
 	if permit != nil {

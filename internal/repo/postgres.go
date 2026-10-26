@@ -201,7 +201,7 @@ LIMIT $2`
 }
 
 // AddSkillsToPerfil upsertea skills por nombre y crea las relaciones para un perfil.
-func (r *Repo) AddSkillsToPerfil(ctx context.Context, perfilID string, skills []string, beforeCommit ...func(context.Context) error) error {
+func (r *Repo) AddSkillsToPerfil(ctx context.Context, perfilID string, skills []string, beforeCommit ...func(context.Context, *sql.Tx) error) error {
 	if len(skills) == 0 {
 		return nil
 	}
@@ -257,7 +257,7 @@ ON CONFLICT DO NOTHING
 	}
 	for _, check := range beforeCommit {
 		if check != nil {
-			if err := check(ctx); err != nil {
+			if err := check(ctx, tx); err != nil {
 				return err
 			}
 		}

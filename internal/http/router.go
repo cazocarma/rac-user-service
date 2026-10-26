@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"github.com/cazocarma/rac-platform/documents"
+	documentsdb "github.com/cazocarma/rac-platform/documents/postgres"
 	"github.com/cazocarma/rac-platform/standing"
 	standingdb "github.com/cazocarma/rac-platform/standing/postgres"
 
@@ -22,18 +24,19 @@ import (
 )
 
 type Server struct {
-	standingCache *standing.LeaseCache
-	photoStore    photostore.Store
-	photoDir      string
-	db            *sql.DB
-	repo          *repo.Repo
-	cfg           config.Config
-	security      *platform.Security
-	grantCompa    func(context.Context, string) error
+	documentsSource documents.Source
+	standingCache   *standing.LeaseCache
+	photoStore      photostore.Store
+	photoDir        string
+	db              *sql.DB
+	repo            *repo.Repo
+	cfg             config.Config
+	security        *platform.Security
+	grantCompa      func(context.Context, string) error
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
-	return &Server{standingCache: standing.NewLeaseCache(standingdb.New(db)), db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
+	return &Server{documentsSource: documentsdb.New(db), standingCache: standing.NewLeaseCache(standingdb.New(db)), db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
 }
 
 // SetPhotoStore configures persistence before Router is called.
@@ -59,12 +62,12 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
 		api.GET("/compas/:id/reviews", s.publicReviews)
 		api.GET("/bookings/:id/review", s.security.Require("cliente"), s.bookingReview)
-		api.POST("/bookings/:id/review", s.security.Require("cliente"), s.saveReview)
+		api.POST("/bookings/:id/review", s.security.Require("cliente"), s.requireDocuments(documents.Client, standing.WriteReview), s.saveReview)
 		api.GET("/compas/:id", s.getCompaByID) // detalle
 
 		// Skills
-		api.GET("/skills", s.listSkills)                                                // ?q=&limit=
-		api.POST("/compas/:id/skills", s.security.Require("compa"), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
+		api.GET("/skills", s.listSkills)                                                                                                              // ?q=&limit=
+		api.POST("/compas/:id/skills", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
 
 		// Profile (requires Authorization Bearer)
 		api.GET("/me", s.security.Require("cliente"), s.me)
@@ -75,8 +78,8 @@ func (s *Server) Router() *gin.Engine {
 		api.DELETE("/me/photo", s.security.Require("cliente"), s.deletePhoto)
 		api.GET("/media/profile/:key", s.publicPhoto)
 		api.GET("/me/compa", s.security.Require("cliente"), s.ownCompa)
-		api.PUT("/me/compa", s.security.Require("cliente"), s.saveOwnCompa)
-		api.POST("/compas", s.security.Require("compa"), s.publishCompa)
+		api.PUT("/me/compa", s.security.Require("cliente"), s.requireDocuments(documents.Compa, standing.PublishListing), s.saveOwnCompa)
+		api.POST("/compas", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.publishCompa)
 		api.POST("/profile", s.security.Require("cliente"), s.upsertProfile)
 	}
 
@@ -153,13 +156,25 @@ func (s *Server) addSkillsToCompa(c *gin.Context) {
 	if !ok {
 		return
 	}
-	check := func(ctx context.Context) error {
+	check := func(ctx context.Context, tx *sql.Tx) error {
+		if err := s.lockedDocuments(ctx, tx, p.Subject, documents.Compa, standing.PublishListing); err != nil {
+			return err
+		}
+		if owner != p.Subject {
+			if err := s.lockedDocuments(ctx, tx, owner, documents.Compa, standing.PublishListing); err != nil {
+				return err
+			}
+		}
 		if permit == nil {
 			return nil
 		}
 		return permit.Check(ctx)
 	}
 	if err := s.repo.AddSkillsToPerfil(ctx, id, req.Skills, check); err != nil {
+		if isDocumentFailure(err) {
+			writeDocumentFailure(c, err)
+			return
+		}
 		if errors.Is(err, standing.ErrDenied) || errors.Is(err, standing.ErrUnavailable) {
 			reviewStandingFailure(c, err)
 			return
@@ -319,6 +334,9 @@ func (s *Server) publishCompa(c *gin.Context) {
  ON CONFLICT(usuario_id) DO UPDATE SET descripcion=EXCLUDED.descripcion,tarifa_hora=EXCLUDED.tarifa_hora RETURNING id::text`, p.Subject, body.Descripcion, body.Tarifa).Scan(&id)
 	if err != nil {
 		c.JSON(409, gin.H{"error": "profile_required"})
+		return
+	}
+	if !s.documentCommit(ctx, c, tx, documents.Compa, standing.PublishListing) {
 		return
 	}
 	if permit != nil {
