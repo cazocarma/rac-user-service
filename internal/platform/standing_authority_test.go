@@ -3,12 +3,17 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/cazocarma/rac-platform/documents"
+	documentstransport "github.com/cazocarma/rac-platform/documents/transport"
+	"github.com/cazocarma/rac-platform/policy"
 	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-platform/standing/transport"
 )
@@ -27,8 +32,9 @@ func TestProvisionedStandingReaderKeycloak(t *testing.T) {
 		t.Skip("disposable Keycloak fixture not provided")
 	}
 	var fixture struct {
-		Issuer, JWKS, Token, RuntimeIssuer string
-		Subjects                           map[string]string
+		Issuer, JWKS, Token, RuntimeIssuer       string
+		StandingOnlyToken, AlertToken, ChatToken string
+		Subjects                                 map[string]string
 	}
 	data, err := os.ReadFile(file)
 	if err != nil || json.Unmarshal(data, &fixture) != nil {
@@ -67,6 +73,50 @@ func TestProvisionedStandingReaderKeycloak(t *testing.T) {
 	if snapshot, err := client.Load(context.Background(), "fixture-subject"); err != nil || snapshot.Version != 1 {
 		t.Fatal("real OAuth credentials failed authenticated authority HTTP exchange")
 	}
+	documentBindings := map[string]string{"rac-match-standing": fixture.Subjects["rac-match-standing"], "rac-chat-standing": fixture.Subjects["rac-chat-standing"]}
+	documentAuth, err := NewDocumentsReader(StandingReaderConfig{Issuer: fixture.Issuer, JWKS: fixture.JWKS, Audience: "rac-documents", Subjects: documentBindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		token string
+		want  bool
+	}{{fixture.Token, true}, {fixture.ChatToken, true}, {fixture.StandingOnlyToken, false}, {fixture.AlertToken, false}} {
+		if tc.token == "" {
+			t.Fatal("missing document identity fixture")
+		}
+		r := httptest.NewRequest("POST", "/internal/documents", nil)
+		r.Header.Set("Authorization", "Bearer "+tc.token)
+		if (documentAuth(r) == nil) != tc.want {
+			t.Fatal("real document token scope isolation failed")
+		}
+	}
+	documentAuth, err = NewDocumentsReader(StandingReaderConfig{Issuer: fixture.RuntimeIssuer, JWKS: fixture.JWKS, Audience: "rac-documents", Subjects: documentBindings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentServer := httptest.NewServer(documentstransport.Handler(fixtureDocumentSource{}, documentAuth))
+	defer documentServer.Close()
+	documentClient, err := documentstransport.NewClient(documentServer.URL, documentstransport.TokenProvider(provider), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := documents.Query{AccountID: "11111111-1111-4111-8111-111111111111", Role: documents.Client, Capability: standing.RequestBooking, Locale: "es"}
+	if err := documents.Check(context.Background(), documentClient, query, time.Second); !errors.Is(err, documents.ErrRequired) {
+		t.Fatal("real OAuth document authority exchange failed", err)
+	}
+}
+
+type fixtureDocumentSource struct{}
+
+func (fixtureDocumentSource) ReadDocuments(_ context.Context, q documents.Query) (documents.Observation, error) {
+	now := time.Now()
+	s := documents.Snapshot{ObservedAt: now, Policy: policy.Version{ID: "fixture-policy", State: policy.Approved, ApprovedBy: "fixture-reviewer", EffectiveAt: now.Add(-time.Hour)}}
+	for i, k := range []documents.Kind{documents.TermsClient, documents.CommunityRules, documents.Privacy, documents.SafetyRules} {
+		id := fmt.Sprintf("11111111-1111-4111-8111-%012d", i+1)
+		s.Documents = append(s.Documents, documents.Document{ID: id, Kind: k, MaterialVersion: id, SHA256: [32]byte{byte(i + 1)}, Approved: true, PublishedAt: now.Add(-time.Hour)})
+	}
+	return documents.Observation{Query: q, Revision: 1, Snapshot: s}, nil
 }
 
 func TestStandingAuthorityRolloutConfiguration(t *testing.T) {
