@@ -50,6 +50,10 @@ func (s *Server) Router() *gin.Engine {
 	platform.Health(r, s.db, dependency)
 	api := r.Group("/api/user")
 	api.GET("/admin/summary", s.security.Require("admin"), s.adminStats)
+	api.GET("/documents", s.documents)
+	api.GET("/documents/:id", s.document)
+	api.GET("/me/documents", s.security.Require("cliente"), s.documents)
+	api.POST("/me/documents/acceptances", s.security.Require("cliente"), s.acceptDocuments)
 	{
 		// Compas
 		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
