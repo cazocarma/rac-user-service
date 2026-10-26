@@ -26,6 +26,19 @@ type StandingReaderConfig struct {
 // Construct it once, after provisioning service accounts; configuration errors
 // must prevent the internal endpoint from starting.
 func NewStandingReader(cfg StandingReaderConfig) (func(*http.Request) error, error) {
+	return newServiceReader(cfg, "standing.read")
+}
+
+// NewDocumentsReader requires a distinct document audience and permission;
+// a standing-reader token alone cannot read document acceptance state.
+func NewDocumentsReader(cfg StandingReaderConfig) (func(*http.Request) error, error) {
+	if cfg.Audience != "rac-documents" {
+		return nil, errStandingReader
+	}
+	return newServiceReader(cfg, "documents.read")
+}
+
+func newServiceReader(cfg StandingReaderConfig, permission string) (func(*http.Request) error, error) {
 	validURL := func(raw string) bool {
 		u, err := url.Parse(raw)
 		return err == nil && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && u.Fragment == "" &&
@@ -79,7 +92,7 @@ func NewStandingReader(cfg StandingReaderConfig) (func(*http.Request) error, err
 			return errStandingReader
 		}
 		for _, role := range claims.Access[cfg.Audience].Roles {
-			if role == "standing.read" {
+			if role == permission {
 				return nil
 			}
 		}

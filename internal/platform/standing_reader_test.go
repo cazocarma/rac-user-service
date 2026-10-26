@@ -109,6 +109,36 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	if auth(nil) == nil || auth(httptest.NewRequest("POST", "/", nil)) == nil {
 		t.Fatal("missing request/token accepted")
 	}
+
+	documentConfig := StandingReaderConfig{Issuer: issuer, JWKS: jwks.URL, Audience: "rac-documents", Subjects: map[string]string{"rac-match-standing": "machine-subject"}, AllowDevelopmentHTTP: true}
+	documentAuth, err := NewDocumentsReader(documentConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []string{"document reader", "standing audience", "standing role", "human admin"} {
+		c := jwt.MapClaims{"iss": issuer, "aud": "rac-documents", "sub": "machine-subject", "azp": "rac-match-standing", "typ": "Bearer", "iat": time.Now().Unix(), "exp": time.Now().Add(300 * time.Second).Unix(), "resource_access": map[string]any{"rac-documents": map[string]any{"roles": []string{"documents.read"}}}}
+		switch scenario {
+		case "standing audience":
+			c["aud"] = "rac-standing"
+		case "standing role":
+			c["resource_access"] = map[string]any{"rac-documents": map[string]any{"roles": []string{"standing.read"}}}
+		case "human admin":
+			c["azp"] = "rac-web"
+			c["sub"] = "human-subject"
+			c["realm_access"] = map[string]any{"roles": []string{"admin"}}
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+		token.Header["kid"] = "reader"
+		raw, err := token.SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest("GET", "/internal/documents", nil)
+		request.Header.Set("Authorization", "Bearer "+raw)
+		if (documentAuth(request) == nil) != (scenario == "document reader") {
+			t.Fatal("document permission isolation", scenario)
+		}
+	}
 	// A correctly signed, provisioned chat reader can check participants but
 	// cannot use the separate history/recovery surface reserved for match.
 	bindings := map[string]string{"rac-match-standing": "machine-subject", "rac-chat-standing": "chat-subject", "rac-alert-standing": "alert-subject"}
@@ -151,6 +181,31 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 			t.Fatal("chat reader can crawl standing history", path, w.Code)
 		}
 	}
+
+	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
+	documentServer, err := StandingAuthorityFromEnvironment(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := jwt.MapClaims{"iss": issuer, "aud": "rac-documents", "sub": "machine-subject", "azp": "rac-match-standing", "typ": "Bearer", "iat": time.Now().Unix(), "exp": time.Now().Add(300 * time.Second).Unix(), "resource_access": map[string]any{"rac-documents": map[string]any{"roles": []string{"documents.read"}}}}
+	documentToken := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+	documentToken.Header["kid"] = "reader"
+	documentRaw, err := documentToken.SignedString(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{{raw, 401}, {documentRaw, 405}} {
+		r := httptest.NewRequest("GET", "/internal/documents", nil)
+		r.Header.Set("Authorization", "Bearer "+tc.token)
+		w := httptest.NewRecorder()
+		documentServer.Handler.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Fatal("document listener scope", w.Code, tc.want)
+		}
+	}
 	for _, client := range []struct {
 		id, subject string
 		paths       map[string]int
@@ -189,5 +244,19 @@ func TestStandingReaderConfiguration(t *testing.T) {
 		if auth, err := NewStandingReader(cfg); err == nil || auth != nil {
 			t.Fatal("unsafe configuration accepted")
 		}
+	}
+}
+
+func TestDocumentAuthorityRolloutConfiguration(t *testing.T) {
+	for _, value := range []string{"yes", "TRUE", "1"} {
+		t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", value)
+		if _, err := StandingAuthorityFromEnvironment(nil); err == nil {
+			t.Fatal("invalid document rollout accepted")
+		}
+	}
+	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "false")
+	if _, err := StandingAuthorityFromEnvironment(nil); err == nil {
+		t.Fatal("document authority without standing accepted")
 	}
 }

@@ -10,6 +10,8 @@ import (
 	"os"
 	"time"
 
+	documentsdb "github.com/cazocarma/rac-platform/documents/postgres"
+	documentstransport "github.com/cazocarma/rac-platform/documents/transport"
 	standingdb "github.com/cazocarma/rac-platform/standing/postgres"
 	"github.com/cazocarma/rac-platform/standing/transport"
 )
@@ -18,6 +20,14 @@ import (
 // public router never registers this path. Rollout remains explicit until all
 // commercial writers and reconciliation are covered.
 func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
+	documentsEnabled := os.Getenv("DOCUMENTS_ENFORCEMENT_ENABLED")
+	if documentsEnabled != "" && documentsEnabled != "false" && documentsEnabled != "true" {
+		return nil, errors.New("invalid document rollout configuration")
+	}
+	if documentsEnabled == "true" && os.Getenv("STANDING_ENFORCEMENT_ENABLED") != "true" {
+		return nil, errors.New("document authority requires standing infrastructure")
+	}
+
 	switch os.Getenv("STANDING_ENFORCEMENT_ENABLED") {
 	case "", "false":
 		return nil, nil
@@ -75,6 +85,17 @@ func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/internal/standing", transport.Handler(standingdb.New(db), auth))
+	if documentsEnabled == "true" {
+		documentConfig := readerConfig
+		documentConfig.Audience = "rac-documents"
+		documentConfig.Subjects = map[string]string{"rac-match-standing": subjects["rac-match-standing"], "rac-chat-standing": subjects["rac-chat-standing"]}
+		documentAuth, err := NewDocumentsReader(documentConfig)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/internal/documents", documentstransport.Handler(documentsdb.New(db), documentAuth))
+	}
+
 	mux.Handle("/internal/standing/replay", transport.ReplayHandler(standingdb.New(db), replayAuth))
 	mux.Handle("/internal/standing/replay/events", transport.ReplayPageHandler(standingdb.New(db), replayAuth))
 	mux.Handle("/internal/standing/replay/accounts", transport.DiscoveryHandler(standingdb.New(db), discoveryAuth))

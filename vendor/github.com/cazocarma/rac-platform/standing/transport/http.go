@@ -3,16 +3,14 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
+	"github.com/cazocarma/rac-platform/internal/authorityhttp"
 	"github.com/cazocarma/rac-platform/standing"
 )
 
@@ -28,15 +26,11 @@ type Client struct {
 // NewClient requires verified TLS except for explicitly enabled DEV fixtures.
 // Tokens should be short-lived client credentials, scoped to standing reads.
 func NewClient(endpoint string, token TokenProvider, allowDEVHTTP bool) (*Client, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		(u.Scheme != "https" && !(allowDEVHTTP && u.Scheme == "http")) || token == nil {
+	client, err := authorityhttp.New(endpoint, allowDEVHTTP)
+	if err != nil || token == nil {
 		return nil, errors.New("invalid standing authority configuration")
 	}
-	return &Client{endpoint: strings.TrimSuffix(endpoint, "/"), token: token, client: &http.Client{
-		Timeout:       1500 * time.Millisecond,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}, nil
+	return &Client{endpoint: strings.TrimSuffix(endpoint, "/"), token: token, client: client}, nil
 }
 
 type request struct {
@@ -48,15 +42,7 @@ type response struct {
 }
 
 func decode(reader io.Reader, value any) error {
-	d := json.NewDecoder(reader)
-	d.DisallowUnknownFields()
-	if err := d.Decode(value); err != nil {
-		return err
-	}
-	if d.Decode(new(any)) != io.EOF {
-		return errors.New("trailing data")
-	}
-	return nil
+	return authorityhttp.Decode(reader, value)
 }
 
 func (c *Client) Load(ctx context.Context, subject string) (standing.Snapshot, error) {
@@ -75,32 +61,7 @@ func (c *Client) exchange(ctx context.Context, endpoint, subject string, result 
 }
 
 func (c *Client) exchangePayload(ctx context.Context, endpoint string, input any, limit int, result any) error {
-	ctx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	token, err := c.token(ctx)
-	if err != nil || token == "" {
-		return standing.ErrUnavailable
-	}
-	body, err := json.Marshal(input)
-	if err != nil {
-		return standing.ErrUnavailable
-	}
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return standing.ErrUnavailable
-	}
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("Content-Type", "application/json")
-	reply, err := c.client.Do(r)
-	if err != nil {
-		return standing.ErrUnavailable
-	}
-	defer reply.Body.Close()
-	if reply.StatusCode != http.StatusOK {
-		return standing.ErrUnavailable
-	}
-	data, readErr := io.ReadAll(io.LimitReader(reply.Body, int64(limit)+1))
-	if readErr != nil || len(data) > limit || decode(bytes.NewReader(data), result) != nil {
+	if authorityhttp.Exchange(ctx, c.client, endpoint, c.token, input, limit, result) != nil {
 		return standing.ErrUnavailable
 	}
 	return nil

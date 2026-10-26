@@ -15,6 +15,14 @@ const (
 
 type Capability string
 
+// IsProtective classifies a capability; authentication and ownership checks
+// remain mandatory. Other gates reuse this classification to preserve D02.
+func IsProtective(capability Capability) bool { return protective(capability) }
+
+// IsCommercial reports only known commercial capabilities. Unknown values
+// must not become a protective bypass when another gate is added.
+func IsCommercial(capability Capability) bool { return commercial(capability) }
+
 const (
 	PublishListing   Capability = "publish_listing"
 	RequestBooking   Capability = "request_booking"
