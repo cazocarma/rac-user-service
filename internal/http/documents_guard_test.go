@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -102,9 +103,13 @@ func TestDocumentGuardPostgres(t *testing.T) {
 	exec(`INSERT INTO legal_documents(kind,version,locale,content,material_change,legal_review,approved_by,reviewed_at,published_at)
  SELECT kind,'guard-1','es','Synthetic document guard fixture',true,'approved',gen_random_uuid(),now()-interval '2 days',now()-interval '1 day'
  FROM unnest(ARRAY['terms_client','terms_compa','community_rules','privacy','safety_rules']) kind;`)
+	var assessmentID string
 	activate := func(expected int) {
 		t.Helper()
 		exec(`SELECT documents.activate(gen_random_uuid(),$1,'es',ARRAY(SELECT DISTINCT ON(kind) id FROM legal_documents WHERE locale='es' ORDER BY kind,published_at DESC,created_at DESC),gen_random_uuid(),gen_random_uuid());`, expected)
+		if assessmentID != "" {
+			exec("INSERT INTO compa_attestation_requirements(locale,registry_version,definition_id) VALUES('es',$1,$2)", expected+1, assessmentID)
+		}
 	}
 	activate(0)
 	var subject, user string
@@ -217,6 +222,28 @@ func TestDocumentGuardPostgres(t *testing.T) {
 		send("POST", "/api/user/me/documents/acceptances", string(body), 200)
 	}
 	accept()
+	send("PUT", "/api/user/me/compa", string(raw), 503)
+	content := syntheticAssessmentContent()
+	definitionRaw, _ := json.Marshal(content)
+	if err := admin.QueryRow(`INSERT INTO compa_attestation_versions(version,locale,content,legal_review,approved_by,reviewed_at,published_at)
+ VALUES('document-guard-quiz','es',$1,'approved',gen_random_uuid(),now()-interval '1 hour',now()-interval '1 minute') RETURNING id`, string(definitionRaw)).Scan(&assessmentID); err != nil {
+		t.Fatal(err)
+	}
+	exec("INSERT INTO compa_attestation_requirements(locale,registry_version,definition_id) VALUES('es',1,$1)", assessmentID)
+	send("PUT", "/api/user/me/compa", string(raw), 428)
+	if grants != 0 {
+		t.Fatal("assessment prerequisite assigned an external role")
+	}
+	hash := content.Digest()
+	assessmentInput := assessmentRequest{Version: "document-guard-quiz", SHA256: hex.EncodeToString(hash[:]), Registry: registry(), Statements: map[string]bool{}, Answers: map[string]string{}}
+	for _, statement := range content.Statements {
+		assessmentInput.Statements[statement.ID] = true
+	}
+	for _, question := range content.Questions {
+		assessmentInput.Answers[question.ID] = question.CorrectOption
+	}
+	quizRaw, _ := json.Marshal(assessmentInput)
+	send("POST", "/api/user/me/compa/attestation", string(quizRaw), 200)
 	send("PUT", "/api/user/me/compa", string(raw), 200)
 	if grants != 1 {
 		t.Fatal("accepted onboarding did not complete", grants)

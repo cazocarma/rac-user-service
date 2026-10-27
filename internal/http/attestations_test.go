@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cazocarma/rac-platform/documents"
+	documentsdb "github.com/cazocarma/rac-platform/documents/postgres"
 	"github.com/cazocarma/rac-user-service/internal/attestations"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
@@ -70,13 +72,7 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	if w := request("GET", "fixture", nil); w.Code != 503 {
 		t.Fatal("missing reviewed definition", w.Code)
 	}
-	content := attestations.Content{}
-	for _, id := range []string{"no_illicit_substances", "no_sexual_services", "catalog_only", "adults_only", "enforcement_and_appeal"} {
-		content.Statements = append(content.Statements, attestations.Statement{ID: id, Text: "Declaración sintética para prueba; no texto definitivo"})
-	}
-	for _, id := range []string{"scenario_one", "scenario_two", "scenario_three"} {
-		content.Questions = append(content.Questions, attestations.Question{ID: id, Text: "Escenario sintético", CorrectOption: "reject_report", Options: []attestations.Option{{ID: "reject_report", Text: "Rechazar y reportar"}, {ID: "proceed", Text: "Continuar"}}})
-	}
+	content := syntheticAssessmentContent()
 	raw, _ := json.Marshal(content)
 	var definitionID string
 	err = admin.QueryRow(`INSERT INTO compa_attestation_versions(version,locale,content,legal_review,approved_by,reviewed_at,published_at)
@@ -196,6 +192,71 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil || view.Passed == nil || !view.Passed.Equal(first) {
 		t.Fatal("nonmaterial binding forgot prior pass", w.Code, w.Body.String())
 	}
+	// A valid pass does not survive a new assessment definition. Activation
+	// between the HTTP preflight and writer commit must roll back every writer.
+	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
+	exec("INSERT INTO document_acceptances(user_id,document_id,context) SELECT $1,id,'account' FROM legal_documents", buyer)
+	var profileID string
+	if err = admin.QueryRow(`INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora) VALUES(gen_random_uuid(),$1,'Original synthetic profile',100) RETURNING id`, buyer).Scan(&profileID); err != nil {
+		t.Fatal(err)
+	}
+	// Staff must not be prompted to accept another user's obligations.
+	exec("INSERT INTO document_acceptances(user_id,document_id,context) SELECT $1,id,'account' FROM legal_documents", other)
+	var otherProfile string
+	if err = admin.QueryRow("SELECT id FROM compa_perfil WHERE usuario_id=$1", other).Scan(&otherProfile); err != nil {
+		t.Fatal(err)
+	}
+	ownerRequest := httptest.NewRequest("POST", "/api/user/compas/"+otherProfile+"/skills", strings.NewReader(`{"skills":["owner-bypass"]}`))
+	ownerRequest.Header.Set("Authorization", "Bearer fixture")
+	ownerResponse := httptest.NewRecorder()
+	router.ServeHTTP(ownerResponse, ownerRequest)
+	if ownerResponse.Code != 409 || !strings.Contains(ownerResponse.Body.String(), "owner_prerequisites_required") {
+		t.Fatal("staff could accept or bypass owner requirements", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	updated := syntheticAssessmentContent()
+	updated.Statements[0].Text = "New synthetic reviewed declaration"
+	updatedRaw, _ := json.Marshal(updated)
+	var updatedID string
+	if err = admin.QueryRow(`INSERT INTO compa_attestation_versions(version,locale,content,legal_review,approved_by,reviewed_at,published_at)
+ VALUES('synthetic-2','es',$1,'approved',gen_random_uuid(),now()-interval '1 hour',now()-interval '1 minute') RETURNING id`, string(updatedRaw)).Scan(&updatedID); err != nil {
+		t.Fatal(err)
+	}
+	actual := documentsdb.New(db)
+	changed := false
+	s.documentsSource = documentSourceFunc(func(ctx context.Context, q documents.Query) (documents.Observation, error) {
+		snapshot, err := actual.ReadDocuments(ctx, q)
+		if !changed {
+			changed = true
+			exec(`SELECT documents.activate(gen_random_uuid(),2,'es',ARRAY(SELECT id FROM legal_documents ORDER BY kind),gen_random_uuid(),gen_random_uuid())`)
+			exec("INSERT INTO compa_attestation_requirements(locale,registry_version,definition_id) VALUES('es',3,$1)", updatedID)
+		}
+		return snapshot, err
+	})
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{"PUT", "/api/user/me/compa", validCompaProfile()},
+		{"POST", "/api/user/compas", map[string]any{"descripcion": "Changed legacy profile", "tarifa_hora": 100}},
+		{"POST", "/api/user/compas/" + profileID + "/skills", map[string]any{"skills": []string{"quiz-bypass"}}},
+	} {
+		payload, _ := json.Marshal(tc.body)
+		r := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(payload))
+		r.Header.Set("Authorization", "Bearer fixture")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, r)
+		if w.Code != 428 || !strings.Contains(w.Body.String(), "COMPA_ATTESTATION_REQUIRED") {
+			t.Fatal("assessment bypass or wrong error", tc.path, w.Code, w.Body.String())
+		}
+	}
+	var description string
+	if err = admin.QueryRow("SELECT descripcion FROM compa_perfil WHERE id=$1", profileID).Scan(&description); err != nil || description != "Original synthetic profile" {
+		t.Fatal("stale assessment committed profile", description, err)
+	}
+	if err = admin.QueryRow("SELECT count(*) FROM compa_perfil_skill WHERE perfil_id=$1", profileID).Scan(&count); err != nil || count != 0 {
+		t.Fatal("assessment bypass committed skills", count, err)
+	}
+
 }
 
 func TestAssessmentRejectsAmbiguousConsentBeforeDatabase(t *testing.T) {
@@ -223,4 +284,15 @@ func TestAssessmentRejectsAmbiguousConsentBeforeDatabase(t *testing.T) {
 			t.Fatal("ambiguous or caller-owned consent accepted", w.Code)
 		}
 	}
+}
+
+func syntheticAssessmentContent() attestations.Content {
+	content := attestations.Content{}
+	for _, id := range []string{"no_illicit_substances", "no_sexual_services", "catalog_only", "adults_only", "enforcement_and_appeal"} {
+		content.Statements = append(content.Statements, attestations.Statement{ID: id, Text: "Declaración sintética para prueba; no texto definitivo"})
+	}
+	for _, id := range []string{"scenario_one", "scenario_two", "scenario_three"} {
+		content.Questions = append(content.Questions, attestations.Question{ID: id, Text: "Escenario sintético", CorrectOption: "reject_report", Options: []attestations.Option{{ID: "reject_report", Text: "Rechazar y reportar"}, {ID: "proceed", Text: "Continuar"}}})
+	}
+	return content
 }

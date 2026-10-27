@@ -164,6 +164,9 @@ func (s *Server) addSkillsToCompa(c *gin.Context) {
 		}
 		if owner != p.Subject {
 			if err := s.lockedDocuments(ctx, tx, owner, documents.Compa, standing.PublishListing); err != nil {
+				if errors.Is(err, documents.ErrRequired) || errors.Is(err, errAssessmentRequired) {
+					return errOwnerPrerequisites
+				}
 				return err
 			}
 		}
