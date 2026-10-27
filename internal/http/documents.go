@@ -42,6 +42,10 @@ func (s *Server) documents(c *gin.Context) {
 	if c.FullPath() == "/api/user/me/documents" {
 		subject = platform.Principal(c).Subject
 	}
+	if documentsEnabled() {
+		s.activeDocuments(c, locale, subject)
+		return
+	}
 	rows, err := s.db.QueryContext(c.Request.Context(), `SELECT DISTINCT ON(d.kind) d.id,d.kind,d.version,d.locale,encode(d.content_sha256,'hex'),d.material_change,d.published_at,a.accepted_at
  FROM legal_documents d LEFT JOIN usuario u ON u.keycloak_id=$2
  LEFT JOIN document_acceptances a ON a.user_id=u.id AND a.document_id=d.id
@@ -90,6 +94,7 @@ func (s *Server) document(c *gin.Context) {
 }
 
 type acceptanceRequest struct {
+	Registry  *registryReference `json:"registry,omitempty"`
 	Documents []struct {
 		ID     string `json:"id"`
 		SHA256 string `json:"sha256"`
@@ -105,6 +110,14 @@ func (s *Server) acceptDocuments(c *gin.Context) {
 	if d.Decode(&input) != nil || d.Decode(new(any)) != io.EOF || len(input.Documents) < 1 || len(input.Documents) > 5 ||
 		(input.Context != "account" && input.Context != "compa_onboarding" && input.Context != "booking") {
 		c.JSON(400, gin.H{"error": "invalid_document_acceptance"})
+		return
+	}
+	if input.Registry != nil && (input.Registry.Version == 0 || !standing.ValidAccountID(input.Registry.PolicyVersion) || (input.Registry.Locale != "es" && input.Registry.Locale != "en")) {
+		c.JSON(400, gin.H{"error": "invalid_document_acceptance"})
+		return
+	}
+	if documentsEnabled() && input.Registry == nil {
+		c.JSON(409, gin.H{"error": "document_registry_changed"})
 		return
 	}
 	seen := map[string]bool{}
@@ -123,6 +136,20 @@ func (s *Server) acceptDocuments(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	var version uint64
+	var locale string
+	if documentsEnabled() {
+		var policy string
+		locale = input.Registry.Locale
+		if err = tx.QueryRowContext(c.Request.Context(), "SELECT registry_version,policy_version FROM documents.lock_registry($1)", locale).Scan(&version, &policy); err != nil {
+			documentFailure(c)
+			return
+		}
+		if version != input.Registry.Version || policy != strings.ToLower(input.Registry.PolicyVersion) {
+			c.JSON(409, gin.H{"error": "document_registry_changed"})
+			return
+		}
+	}
 	var user string
 	if err = tx.QueryRowContext(c.Request.Context(), `SELECT id FROM usuario WHERE keycloak_id=$1`, platform.Principal(c).Subject).Scan(&user); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -134,8 +161,9 @@ func (s *Server) acceptDocuments(c *gin.Context) {
 	}
 	for _, item := range input.Documents {
 		var available bool
-		if err = tx.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT FROM legal_documents WHERE id=$1 AND content_sha256=decode($2,'hex')
- AND legal_review='approved' AND published_at<=statement_timestamp())`, item.ID, item.SHA256).Scan(&available); err != nil {
+		if err = tx.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT FROM legal_documents d WHERE id=$1 AND content_sha256=decode($2,'hex')
+ AND legal_review='approved' AND published_at<=statement_timestamp()
+ AND (NOT $3::boolean OR EXISTS(SELECT FROM documents.requirement r WHERE r.locale=$4 AND r.version=$5 AND r.document_id=d.id)))`, item.ID, item.SHA256, documentsEnabled(), locale, version).Scan(&available); err != nil {
 			documentFailure(c)
 			return
 		}

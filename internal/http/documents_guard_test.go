@@ -146,6 +146,55 @@ func TestDocumentGuardPostgres(t *testing.T) {
 	if grants != 0 {
 		t.Fatal("unaccepted documents assigned external role")
 	}
+	registry := func() registryReference {
+		t.Helper()
+		var ref registryReference
+		ref.Locale = "es"
+		if err := admin.QueryRow(`SELECT r.version,r.policy_version FROM documents.head h JOIN documents.registry r ON r.locale=h.locale AND r.version=h.version WHERE h.locale='es'`).Scan(&ref.Version, &ref.PolicyVersion); err != nil {
+			t.Fatal(err)
+		}
+		return ref
+	}
+	initialRegistry := registry()
+	for _, path := range []string{"/api/user/documents", "/api/user/me/documents"} {
+		request := httptest.NewRequest("GET", path, nil)
+		request.Header.Set("Authorization", "Bearer fixture")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, request)
+		var page struct {
+			Registry registryView   `json:"registry"`
+			Items    []documentView `json:"items"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Registry.Version != 1 || len(page.Items) != 5 {
+			t.Fatal("active set unavailable", w.Code, w.Body.String())
+		}
+	}
+	// Reviewed publication alone does not replace the operator-activated set.
+	exec(`INSERT INTO legal_documents(kind,version,locale,content,material_change,legal_review,approved_by,reviewed_at,published_at) VALUES('community_rules','unselected','es','Synthetic unselected revision',false,'approved',gen_random_uuid(),now()-interval '2 days',clock_timestamp());`)
+	request := httptest.NewRequest("GET", "/api/user/me/documents", nil)
+	request.Header.Set("Authorization", "Bearer fixture")
+	listed := httptest.NewRecorder()
+	router.ServeHTTP(listed, request)
+	if listed.Code != 200 || strings.Contains(listed.Body.String(), "unselected") {
+		t.Fatal("unselected publication became current", listed.Code, listed.Body.String())
+	}
+	send("GET", "/api/user/me/documents?locale=en", "", 503)
+	var itemID, itemHash string
+	if err := admin.QueryRow(`SELECT d.id,encode(d.content_sha256,'hex') FROM documents.head h JOIN documents.requirement r ON r.locale=h.locale AND r.version=h.version JOIN legal_documents d ON d.id=r.document_id WHERE h.locale='es' AND d.kind='terms_client'`).Scan(&itemID, &itemHash); err != nil {
+		t.Fatal(err)
+	}
+	withoutRef, _ := json.Marshal(map[string]any{"documents": []map[string]string{{"id": itemID, "sha256": itemHash}}, "context": "account"})
+	send("POST", "/api/user/me/documents/acceptances", string(withoutRef), 409)
+	var unpublishedID, unpublishedHash string
+	if err := admin.QueryRow(`SELECT id,encode(content_sha256,'hex') FROM legal_documents WHERE version='unselected'`).Scan(&unpublishedID, &unpublishedHash); err != nil {
+		t.Fatal(err)
+	}
+	wrongSet, _ := json.Marshal(map[string]any{"registry": initialRegistry, "documents": []map[string]string{{"id": unpublishedID, "sha256": unpublishedHash}}, "context": "account"})
+	send("POST", "/api/user/me/documents/acceptances", string(wrongSet), 409)
+	var consentCount int
+	if err := admin.QueryRow(`SELECT count(*) FROM document_acceptances WHERE user_id=$1`, user).Scan(&consentCount); err != nil || consentCount != 0 {
+		t.Fatal("invalid target recorded consent", consentCount, err)
+	}
 	accept := func() {
 		t.Helper()
 		rows, err := admin.Query(`SELECT d.id,encode(d.content_sha256,'hex') FROM documents.head h JOIN documents.requirement r ON r.locale=h.locale AND r.version=h.version JOIN legal_documents d ON d.id=r.document_id WHERE h.locale='es'`)
@@ -164,7 +213,7 @@ func TestDocumentGuardPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		rows.Close()
-		body, _ := json.Marshal(map[string]any{"documents": items, "context": "compa_onboarding"})
+		body, _ := json.Marshal(map[string]any{"registry": registry(), "documents": items, "context": "compa_onboarding"})
 		send("POST", "/api/user/me/documents/acceptances", string(body), 200)
 	}
 	accept()
@@ -178,6 +227,9 @@ func TestDocumentGuardPostgres(t *testing.T) {
 	}
 	publish("guard-2")
 	activate(1)
+	stale, _ := json.Marshal(map[string]any{"registry": initialRegistry, "documents": []map[string]string{{"id": itemID, "sha256": itemHash}}, "context": "account"})
+	send("POST", "/api/user/me/documents/acceptances", string(stale), 409)
+
 	send("PUT", "/api/user/me/compa", string(raw), 428)
 	send("GET", "/api/user/me/compa", "", 200)
 	accept()
