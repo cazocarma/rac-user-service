@@ -3,9 +3,7 @@ package httpapi
 import (
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -105,9 +103,7 @@ type acceptanceRequest struct {
 func (s *Server) acceptDocuments(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	var input acceptanceRequest
-	d := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, 8192))
-	d.DisallowUnknownFields()
-	if d.Decode(&input) != nil || d.Decode(new(any)) != io.EOF || len(input.Documents) < 1 || len(input.Documents) > 5 ||
+	if decodeUniqueJSON(http.MaxBytesReader(c.Writer, c.Request.Body, 8192), &input) != nil || len(input.Documents) < 1 || len(input.Documents) > 5 ||
 		(input.Context != "account" && input.Context != "compa_onboarding" && input.Context != "booking") {
 		c.JSON(400, gin.H{"error": "invalid_document_acceptance"})
 		return

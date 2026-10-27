@@ -50,6 +50,47 @@ func TestDocumentsRejectMalformedConsentBeforeDatabase(t *testing.T) {
 	}
 }
 
+// Each body would otherwise be valid: duplicate properties must fail before
+// persistence, even when both spellings carry identical values.
+func TestDocumentsRejectAmbiguousConsentBeforeDatabase(t *testing.T) {
+	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
+	s := New(nil, config.Config{})
+	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
+		p := &platform.Claims{Subject: "fixture"}
+		p.RealmAccess.Roles = []string{"cliente"}
+		return p, nil
+	}}
+	router := s.Router()
+	const id = "11111111-1111-4111-8111-111111111111"
+	hash := strings.Repeat("a", 64)
+	registry := `{"locale":"es","version":1,"policy_version":"` + id + `"}`
+	document := `{"id":"` + id + `","sha256":"` + hash + `"}`
+	valid := `{"registry":` + registry + `,"documents":[` + document + `],"context":"account"}`
+	var parsed acceptanceRequest
+	if err := decodeUniqueJSON(strings.NewReader(valid), &parsed); err != nil {
+		t.Fatal("valid control rejected", err)
+	}
+	cases := map[string]string{
+		"context":          strings.Replace(valid, `"context":"account"`, `"context":"booking","context":"account"`, 1),
+		"documents":        strings.Replace(valid, `"documents":`, `"documents":[],"documents":`, 1),
+		"document ID":      strings.Replace(valid, `"id":`, `"id":"`+id+`","id":`, 1),
+		"document hash":    strings.Replace(valid, `"sha256":`, `"sha256":"`+hash+`","sha256":`, 1),
+		"registry version": strings.Replace(valid, `"version":1`, `"version":1,"version":1`, 1),
+		"escaped key":      strings.Replace(valid, `"context":"account"`, `"context":"account","con\u0074ext":"account"`, 1),
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/user/me/documents/acceptances", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer fixture")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_document_acceptance") {
+				t.Fatalf("ambiguous consent reached persistence: %d %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestVersionedDocumentsPostgres(t *testing.T) {
 	dsn := os.Getenv("RAC_DOCUMENT_TEST_DATABASE_URL")
 	if dsn == "" {
