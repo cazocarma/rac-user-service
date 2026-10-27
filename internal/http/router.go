@@ -56,6 +56,7 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/documents", s.documents)
 	api.GET("/documents/:id", s.document)
 	api.GET("/me/documents", s.security.Require("cliente"), s.documents)
+	api.GET("/me/documents/history", s.security.Require("cliente"), s.documentHistory)
 	api.POST("/me/documents/acceptances", s.security.Require("cliente"), s.acceptDocuments)
 	api.GET("/me/compa/attestation", s.security.Require("cliente"), s.ownAssessment)
 	api.POST("/me/compa/attestation", s.security.Require("cliente"), s.submitAssessment)

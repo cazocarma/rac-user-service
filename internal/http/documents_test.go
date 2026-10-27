@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -179,6 +180,70 @@ func TestVersionedDocumentsPostgres(t *testing.T) {
 	if w = send("GET", "/api/user/documents", "", false); w.Code != 200 || strings.Contains(w.Body.String(), `"accepted_at"`) {
 		t.Fatal("public endpoint disclosed private consent")
 	}
+	// Historical versions must remain visible even when they are not current.
+	for i := 0; i < 2; i++ {
+		var old string
+		if err := admin.QueryRow(`INSERT INTO legal_documents(kind,version,locale,content,material_change,legal_review,approved_by,reviewed_at,published_at)
+ VALUES('terms_client',$1,'es',$2,false,'approved',$3,$4,$5) RETURNING id`, version+"-history-"+strconv.Itoa(i), content, user, first.Add(-2*time.Hour), first.Add(-time.Hour)).Scan(&old); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := admin.Exec(`INSERT INTO document_acceptances(user_id,document_id,accepted_at,context) VALUES($1,$2,$3,'booking')`, user, old, first); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true") // No active registry exists in this fixture.
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	seen := map[string]bool{}
+	cursor := ""
+	for page := 0; page < 4; page++ {
+		path := "/api/user/me/documents/history?limit=1"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		w := send("GET", path, "", true)
+		var result struct {
+			Items []historyItem `json:"items"`
+			Next  *string       `json:"next_cursor"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Items) != 1 {
+			t.Fatal("own history unavailable", w.Code, w.Body.String())
+		}
+		item := result.Items[0]
+		if seen[item.ID] || item.AcceptedAt == nil || item.SHA256 != digest || item.Content != "" {
+			t.Fatal("duplicate or inexact history", item)
+		}
+		seen[item.ID] = true
+		if result.Next == nil {
+			break
+		}
+		cursor = *result.Next
+	}
+	if len(seen) != 3 {
+		t.Fatal("timestamp ties lost historical versions", len(seen))
+	}
+	for _, query := range []string{"limit=0", "limit=51", "limit=no", "cursor=invalid", "cursor=", "limit=1&limit=2"} {
+		if w := send("GET", "/api/user/me/documents/history?"+query, "", true); w.Code != 400 {
+			t.Fatal("unbounded history query accepted", query, w.Code)
+		}
+	}
+	if w := send("GET", "/api/user/me/documents/history", "", false); w.Code != 401 {
+		t.Fatal("history did not require authentication", w.Code)
+	}
+	originalSubject := subject
+	var otherUser string
+	if err := admin.QueryRow(`INSERT INTO usuario(id,nombre,correo,rol,keycloak_id) VALUES(gen_random_uuid(),'Other fixture',gen_random_uuid()::text||'@history.test','cliente',gen_random_uuid()::text) RETURNING id,keycloak_id`).Scan(&otherUser, &subject); err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Exec("DELETE FROM usuario WHERE id=$1", otherUser)
+	w = send("GET", "/api/user/me/documents/history?user_id="+user+"&cursor="+url.QueryEscape(cursor), "", true)
+	var isolated struct {
+		Items []historyItem `json:"items"`
+		Next  *string       `json:"next_cursor"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &isolated) != nil || len(isolated.Items) != 0 || isolated.Next != nil {
+		t.Fatal("history crossed authenticated subject", w.Code, w.Body.String())
+	}
+	subject = originalSubject
 	for _, query := range []string{`UPDATE legal_documents SET content='changed'`, `DELETE FROM legal_documents`, `UPDATE document_acceptances SET context='booking'`, `DELETE FROM document_acceptances`} {
 		if _, err = db.Exec(query); err == nil {
 			t.Fatal("unexpected runtime document privilege")
