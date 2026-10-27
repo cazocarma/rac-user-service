@@ -50,7 +50,7 @@ func TestDocumentsRejectMalformedConsentBeforeDatabase(t *testing.T) {
 }
 
 func TestVersionedDocumentsPostgres(t *testing.T) {
-	dsn := os.Getenv("RAC_ONBOARDING_TEST_DATABASE_URL")
+	dsn := os.Getenv("RAC_DOCUMENT_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("requires disposable migrated database")
 	}
