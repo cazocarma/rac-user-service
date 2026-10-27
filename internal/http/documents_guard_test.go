@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -145,6 +148,28 @@ func TestDocumentGuardPostgres(t *testing.T) {
 			t.Fatal(method, path, w.Code, w.Body.String())
 		}
 	}
+
+	personal := `{"nombre":"Private account","biografia":"Synthetic biography","intereses":[]}`
+	legacy := `{"nombre":"Legacy changed","correo":"ignored@example.test","fecha_nacimiento":"1990-01-01","telefono":"12345678","pais":"Chile","region":"RM","ciudad":"Santiago","intereses":[]}`
+	// No commercial listing exists yet: account provisioning must not require
+	// commercial documents or an assessment that itself needs this account.
+	send("PUT", "/api/user/me", personal, 200)
+	var imageBytes bytes.Buffer
+	if err := png.Encode(&imageBytes, image.NewRGBA(image.Rect(0, 0, 96, 96))); err != nil {
+		t.Fatal(err)
+	}
+	s.photoDir = t.TempDir()
+	photo := func(want int) {
+		t.Helper()
+		request := httptest.NewRequest("PUT", "/api/user/me/photo", bytes.NewReader(imageBytes.Bytes()))
+		request.Header.Set("Authorization", "Bearer fixture")
+		request.Header.Set("Content-Type", "image/png")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, request)
+		if w.Code != want {
+			t.Fatal("photo prerequisite", w.Code, w.Body.String())
+		}
+	}
 	profile := validCompaProfile()
 	raw, _ := json.Marshal(profile)
 	send("PUT", "/api/user/me/compa", string(raw), 428)
@@ -252,11 +277,34 @@ func TestDocumentGuardPostgres(t *testing.T) {
 		t.Helper()
 		exec(`INSERT INTO legal_documents(kind,version,locale,content,material_change,legal_review,approved_by,reviewed_at,published_at) VALUES('privacy',$1,'es','Synthetic material change',true,'approved',gen_random_uuid(),now()-interval '2 days',clock_timestamp());`, version)
 	}
+	send("PUT", "/api/user/me", personal, 200)
+	photo(200)
+	var previousPhoto string
+	if err := admin.QueryRow(`SELECT foto_clave FROM usuario WHERE id=$1`, user).Scan(&previousPhoto); err != nil {
+		t.Fatal(err)
+	}
 	publish("guard-2")
 	activate(1)
 	stale, _ := json.Marshal(map[string]any{"registry": initialRegistry, "documents": []map[string]string{{"id": itemID, "sha256": itemHash}}, "context": "account"})
 	send("POST", "/api/user/me/documents/acceptances", string(stale), 409)
 
+	// Contact-only edits do not republish listing fields.
+	send("PUT", "/api/user/me", strings.Replace(personal, `"nombre":`, `"telefono":"12345678","nombre":`, 1), 200)
+	// A stale JWT still says cliente. Persisted listing ownership determines the
+	// compa requirements, including for the legacy profile route and photo API.
+	send("PUT", "/api/user/me", strings.Replace(personal, "Private account", "Must roll back", 1), 428)
+	send("POST", "/api/user/profile", legacy, 428)
+	photo(428)
+	var storedName, storedPhoto string
+	if err := admin.QueryRow(`SELECT nombre,foto_clave FROM usuario WHERE id=$1`, user).Scan(&storedName, &storedPhoto); err != nil || storedName != "Private account" || storedPhoto != previousPhoto {
+		t.Fatal("blocked public profile update persisted", storedName, storedPhoto, err)
+	}
+	entries, err := os.ReadDir(s.photoDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatal("blocked upload reached object storage", len(entries), err)
+	}
+	// Removing public content is protective even with outstanding documents.
+	send("DELETE", "/api/user/me/photo", "", 200)
 	send("PUT", "/api/user/me/compa", string(raw), 428)
 	send("GET", "/api/user/me/compa", "", 200)
 	accept()

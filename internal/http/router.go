@@ -266,6 +266,9 @@ func (s *Server) upsertProfile(c *gin.Context) {
 	}
 	defer cancel()
 	check := func(ctx context.Context, tx *sql.Tx) error {
+		if err := s.lockedPublicProfileDocuments(ctx, tx, principal.Subject); err != nil {
+			return err
+		}
 		if !standingEnabled() {
 			return nil
 		}
@@ -280,6 +283,10 @@ func (s *Server) upsertProfile(c *gin.Context) {
 		return permit.Check(bounded)
 	}
 	if err := s.repo.UpsertProfileByKeycloak(ctx, principal.Subject, in, check); err != nil {
+		if isDocumentFailure(err) {
+			writeDocumentFailure(c, err)
+			return
+		}
 		if errors.Is(err, standing.ErrDenied) || errors.Is(err, standing.ErrUnavailable) {
 			reviewStandingFailure(c, err)
 			return

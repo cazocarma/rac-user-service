@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -88,6 +90,18 @@ func (s *Server) saveMe(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	// Serialize against other updates and distinguish private contact edits
+	// from changes to fields actually rendered in the public compa card.
+	var publicChanged bool
+	err = tx.QueryRowContext(ctx, `SELECT nombre IS DISTINCT FROM $2 OR biografia IS DISTINCT FROM $3 OR COALESCE(intereses,'{}'::text[]) IS DISTINCT FROM $4::text[] FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject, body.Name, body.Biography, pq.Array(body.Interests)).Scan(&publicChanged)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(409, gin.H{"error": "profile_required"})
+		return
+	}
+	if err != nil {
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
+		return
+	}
 	// Subject always comes from the verified token, never from the request body.
 	result, err := tx.ExecContext(ctx, `UPDATE usuario SET nombre=$2,telefono=NULLIF($3,''),pais=NULLIF($4,''),region=NULLIF($5,''),ciudad=NULLIF($6,''),intereses=$7,biografia=$8 WHERE keycloak_id=$1`, platform.Principal(c).Subject, body.Name, body.Phone, body.Country, body.Region, body.City, pq.Array(body.Interests), body.Biography)
 	if err != nil {
@@ -102,6 +116,12 @@ func (s *Server) saveMe(c *gin.Context) {
 	if count == 0 {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return
+	}
+	if publicChanged {
+		if err = s.lockedPublicProfileDocuments(ctx, tx, platform.Principal(c).Subject); err != nil {
+			writeDocumentFailure(c, err)
+			return
+		}
 	}
 	if permit != nil {
 		if err = permit.Check(ctx); err != nil {

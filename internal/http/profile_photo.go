@@ -101,6 +101,12 @@ func (s *Server) savePhoto(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})
 		return
 	}
+	// Hold the current registry lease before the external object write and
+	// through the DB commit that exposes the new photo.
+	if err = s.lockedPublicProfileDocuments(ctx, tx, platform.Principal(c).Subject); err != nil {
+		writeDocumentFailure(c, err)
+		return
+	}
 	var random [16]byte
 	if _, err = rand.Read(random[:]); err != nil {
 		c.JSON(503, gin.H{"error": "photo_unavailable"})

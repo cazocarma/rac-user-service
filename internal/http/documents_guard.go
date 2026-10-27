@@ -79,3 +79,20 @@ func (s *Server) documentCommit(ctx context.Context, c *gin.Context, tx *sql.Tx,
 	}
 	return true
 }
+
+// Personal data is also listing content once this owner has a compa profile.
+// Derive that persona from persisted ownership, never JWT roles. Initial account
+// provisioning and photo removal remain available without commercial consent.
+func (s *Server) lockedPublicProfileDocuments(ctx context.Context, tx *sql.Tx, subject string) error {
+	if !documentsEnabled() {
+		return nil
+	}
+	var public bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT FROM compa_perfil cp JOIN usuario u ON u.id=cp.usuario_id WHERE u.keycloak_id=$1)`, subject).Scan(&public); err != nil {
+		return documents.ErrUnavailable
+	}
+	if !public {
+		return nil
+	}
+	return s.lockedDocuments(ctx, tx, subject, documents.Compa, standing.PublishListing)
+}
