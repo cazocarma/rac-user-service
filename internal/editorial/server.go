@@ -32,6 +32,9 @@ const publishSignature = "documents.publish_document(audit.reference,audit.refer
 const readSignature = "documents.read_editorial_document(uuid)"
 const readySignature = "documents.editorial_ready()"
 
+var requiredSignatures = []string{draftSignature, reviewSignature, publishSignature, readSignature, readySignature,
+	assessmentDraftSignature, assessmentReviewSignature, assessmentPublishSignature, assessmentReadSignature, bundleSignature}
+
 type Server struct {
 	db     *sql.DB
 	access *staff.Access
@@ -50,13 +53,11 @@ func New(ctx context.Context, db *sql.DB, access *staff.Access, policy string) (
  AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid)
  AND session_user NOT IN('rac_user','rac_match','rac_chat','rac_alert','rac_backup','rac_seed','rac_migrator')
  AND NOT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN('public','audit','documents','standing') AND c.relkind IN('r','p','v','m','f') AND NOT EXISTS(SELECT FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e') AND has_table_privilege(session_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
- AND has_function_privilege(session_user,$1,'EXECUTE') AND has_function_privilege(session_user,$2,'EXECUTE')
- AND has_function_privilege(session_user,$3,'EXECUTE') AND has_function_privilege(session_user,$4,'EXECUTE')
- AND has_function_privilege(session_user,$5,'EXECUTE') AND documents.editorial_ready()
+ AND NOT EXISTS(SELECT FROM unnest($1::text[]) signature WHERE NOT has_function_privilege(session_user,signature,'EXECUTE')) AND documents.editorial_ready()
  AND NOT has_function_privilege(session_user,'documents.activate(uuid,bigint,text,uuid[],uuid,uuid,text[])','EXECUTE')
  AND NOT has_function_privilege(session_user,'documents.editorial_record(uuid,uuid,uuid,uuid,text,jsonb)','EXECUTE')
  AND NOT has_function_privilege(session_user,'audit.append(uuid,text,uuid,text,uuid,uuid)','EXECUTE')
- FROM pg_roles r WHERE r.rolname=session_user`, draftSignature, reviewSignature, publishSignature, readSignature, readySignature).Scan(&allowed)
+ FROM pg_roles r WHERE r.rolname=session_user`, pq.Array(requiredSignatures)).Scan(&allowed)
 	if err != nil || !allowed {
 		return nil, errors.New("editorial database privileges not isolated")
 	}
@@ -100,6 +101,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /internal/documents/reviews", s.access.Require(staff.DocumentsApprove, http.HandlerFunc(s.review)))
 	mux.Handle("POST /internal/documents/publications", s.access.Require(staff.DocumentsPublish, http.HandlerFunc(s.publish)))
 	mux.Handle("GET /internal/documents/{id}", s.access.Require(staff.DocumentsRead, http.HandlerFunc(s.read)))
+	mux.Handle("POST /internal/assessments/drafts", s.access.Require(staff.DocumentsDraft, http.HandlerFunc(s.draftAssessment)))
+	mux.Handle("POST /internal/assessments/reviews", s.access.Require(staff.DocumentsApprove, http.HandlerFunc(s.reviewAssessment)))
+	mux.Handle("POST /internal/assessments/publications", s.access.Require(staff.DocumentsPublish, http.HandlerFunc(s.publishAssessment)))
+	mux.Handle("GET /internal/assessments/{id}", s.access.Require(staff.DocumentsRead, http.HandlerFunc(s.readAssessment)))
+	mux.Handle("POST /internal/documents/activations", s.access.Require(staff.DocumentsActivate, http.HandlerFunc(s.activateBundle)))
+
 	return mux
 }
 
@@ -167,6 +174,15 @@ func fail(w http.ResponseWriter, err error) {
 	problem(w, 503, "editorial_unavailable")
 }
 func (s *Server) execute(w http.ResponseWriter, r *http.Request, permission staff.Permission, statement string, args ...any) {
+	s.transact(w, r, permission, func(ctx context.Context, tx *sql.Tx, actor, policy string) (any, error) {
+		args = append(args, actor, policy)
+		var id string
+		err := tx.QueryRowContext(ctx, statement, args...).Scan(&id)
+		return map[string]string{"document_id": id}, err
+	})
+}
+func (s *Server) transact(w http.ResponseWriter, r *http.Request, permission staff.Permission, operation func(context.Context, *sql.Tx, string, string) (any, error)) {
+
 	session, ok := staff.Principal(r.Context())
 	if !ok {
 		problem(w, 401, "invalid_staff_token")
@@ -192,11 +208,9 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, permission staf
 		fail(w, err)
 		return
 	}
-	// Actor and policy are supplied by verified context and server configuration,
-	// never fields accepted from the command body.
-	args = append(args, session.Subject, s.policy)
-	var id string
-	if err = tx.QueryRowContext(ctx, statement, args...).Scan(&id); err != nil {
+	// Actor and policy originate only at this verified boundary.
+	result, err := operation(ctx, tx, session.Subject, s.policy)
+	if err != nil {
 		if freshness := session.Check(permission, s.now()); freshness != nil {
 			fail(w, freshness)
 		} else {
@@ -204,6 +218,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, permission staf
 		}
 		return
 	}
+
 	if err = session.Check(permission, s.now()); err != nil {
 		fail(w, err)
 		return
@@ -213,7 +228,7 @@ func (s *Server) execute(w http.ResponseWriter, r *http.Request, permission staf
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"document_id": id})
+	_ = json.NewEncoder(w).Encode(result)
 }
 func (s *Server) draft(w http.ResponseWriter, r *http.Request) {
 	var body draftRequest
@@ -251,6 +266,9 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 	s.execute(w, r, staff.DocumentsPublish, `SELECT documents.publish_document($1::audit.reference,$2::audit.reference,$4::audit.reference,$5::audit.reference,$3::audit.digest)`, body.EventID, body.DocumentID, body.SHA256)
 }
 func (s *Server) read(w http.ResponseWriter, r *http.Request) {
+	s.readResource(w, r, "SELECT documents.read_editorial_document($1)")
+}
+func (s *Server) readResource(w http.ResponseWriter, r *http.Request, query string) {
 	if !audit.ValidID(r.PathValue("id")) {
 		problem(w, 404, "editorial_document_not_found")
 		return
@@ -258,7 +276,7 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var raw []byte
-	if err := s.db.QueryRowContext(ctx, "SELECT documents.read_editorial_document($1)", r.PathValue("id")).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(ctx, query, r.PathValue("id")).Scan(&raw); err != nil {
 		fail(w, err)
 		return
 	}

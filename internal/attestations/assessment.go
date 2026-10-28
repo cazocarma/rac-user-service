@@ -98,19 +98,33 @@ func (d Definition) Validate(now time.Time) error {
 	if now.IsZero() || !version.MatchString(d.Version) || (d.Locale != "es" && d.Locale != "en") ||
 		d.RegistryVersion == 0 || !standing.ValidAccountID(d.PolicyVersion) ||
 		!d.Approved || !standing.ValidAccountID(d.ApprovedBy) || d.ReviewedAt.IsZero() ||
-		d.PublishedAt.Before(d.ReviewedAt) || d.PublishedAt.After(now) ||
-		len(d.Content.Statements) != 5 || len(d.Content.Questions) != 3 {
+		d.PublishedAt.Before(d.ReviewedAt) || d.PublishedAt.After(now) {
+		return ErrUnavailable
+	}
+	if err := d.Content.Validate(); err != nil {
+		return err
+	}
+	if d.SHA256 != d.Content.Digest() {
+		return ErrUnavailable
+	}
+	return nil
+}
+
+// Validate checks an editable definition's content without implying legal
+// approval, publication, registry binding or a user's first pass.
+func (c Content) Validate() error {
+	if len(c.Statements) != 5 || len(c.Questions) != 3 {
 		return ErrUnavailable
 	}
 	statements := map[string]bool{}
-	for _, s := range d.Content.Statements {
+	for _, s := range c.Statements {
 		if !statementIDs[s.ID] || statements[s.ID] || !text(s.Text, 2000) {
 			return ErrUnavailable
 		}
 		statements[s.ID] = true
 	}
 	questions := map[string]bool{}
-	for _, q := range d.Content.Questions {
+	for _, q := range c.Questions {
 		if !identifier.MatchString(q.ID) || questions[q.ID] || !text(q.Text, 2000) || len(q.Options) < 2 || len(q.Options) > 4 {
 			return ErrUnavailable
 		}
@@ -125,9 +139,6 @@ func (d Definition) Validate(now time.Time) error {
 		if !options[q.CorrectOption] {
 			return ErrUnavailable
 		}
-	}
-	if d.SHA256 != d.Content.Digest() {
-		return ErrUnavailable
 	}
 	return nil
 }

@@ -185,7 +185,7 @@ func TestEditorialPostgresHTTP(t *testing.T) {
 	}
 	exec(`CREATE ROLE rac_editorial_fixture LOGIN PASSWORD 'synthetic-editorial-only-123456';
  GRANT USAGE ON SCHEMA public,documents,audit TO rac_editorial_fixture;
- GRANT EXECUTE ON FUNCTION ` + draftSignature + `,` + reviewSignature + `,` + publishSignature + `,` + readSignature + `,` + readySignature + ` TO rac_editorial_fixture;
+ GRANT EXECUTE ON FUNCTION ` + strings.Join(requiredSignatures, ",") + ` TO rac_editorial_fixture;
  INSERT INTO audit.chain_heads(chain_id) VALUES('88888888-8888-4888-8888-888888888888');
  INSERT INTO audit.writer_principals VALUES('rac_editorial_fixture','99999999-9999-4999-8999-999999999999','88888888-8888-4888-8888-888888888888');
  CREATE SEQUENCE public.editorial_fixture_probes;
@@ -275,6 +275,7 @@ func TestEditorialPostgresHTTP(t *testing.T) {
 		t.Fatal("expiry did not occur after a real audit insert", probe, err)
 	}
 	s.now = time.Now
+	testAssessmentBundleHTTP(t, admin, s, token)
 	exec("DELETE FROM audit.writer_principals WHERE database_role='rac_editorial_fixture'")
 	send("GET", "/ready", author, nil, 503)
 	late["version"] = "unavailable-audit"

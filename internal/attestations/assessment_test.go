@@ -130,3 +130,14 @@ func TestPublicAssessmentOmitsAnswerKeyAndDoesNotAliasDefinition(t *testing.T) {
 		t.Fatal("public view mutated authoritative definition", err)
 	}
 }
+
+func TestDraftContentValidationDoesNotImplyPublication(t *testing.T) {
+	definition, _, now := fixture()
+	if err := definition.Content.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	draft := Definition{Content: definition.Content}
+	if draft.Validate(now) == nil {
+		t.Fatal("content shape granted publication")
+	}
+}

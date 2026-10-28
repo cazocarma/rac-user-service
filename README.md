@@ -83,13 +83,31 @@ flag o credenciales amplias detiene la activación. La conexión dedicada no pue
 ser superusuario/creador de roles, miembro de otros roles ni tener lectura/DML
 sobre tablas de negocio; tampoco ejecución directa de audit.append, activate o
 el helper de eventos. Se permite metadata de catálogo/extensiones. Su perfil de
-provisión consiste en USAGE de los esquemas necesarios y EXECUTE de los tres
-comandos, read_editorial_document y editorial_ready, sin grants de tablas.
+provisión consiste en USAGE de los esquemas necesarios y EXECUTE de las diez
+funciones comprobadas por internal/editorial.requiredSignatures, sin grants de tablas.
 El escritor/chain de auditoría se provisiona por el operador y se verifica al
 iniciar; su pérdida vuelve readiness a 503 y revierte cualquier escritura.
 
 La migración no crea ese login ni lo asigna a los roles actuales, y este
 incremento no agrega el flag a overlays. El cliente staff continúa deshabilitado
 hasta el enrolamiento/activación aprobados; preparar la audiencia no concede roles.
-Faltan la provisión operativa, proxy/consola de revisión y activación del conjunto
-y del cuestionario. No hay semillas jurídicas ni cambios en DEV persistente.
+Faltan la provisión operativa, la consola web de revisión y el ensayo conectado
+del flujo completo. El proxy y la activación atómica ya tienen implementación local. No hay semillas jurídicas ni cambios en DEV persistente.
+
+### Cuestionario y activación conjunta (V036)
+
+El mismo listener ofrece POST /internal/assessments/drafts, /reviews y
+/publications y GET /internal/assessments/{id}. El servidor valida cinco
+compromisos y tres preguntas y calcula el hash del JSON canónico; el cliente
+no puede imponer el hash del borrador ni metadatos de aprobación. La lectura
+editorial contiene la clave privada; el contrato público sigue excluyéndola.
+El catálogo tipado impide confundir un cuestionario con un documento incluso
+si coinciden sus UUID y hashes.
+
+POST /internal/documents/activations recibe event_id, expected_version, locale,
+cinco referencias document_id/sha256, una referencia definition_id/sha256 y
+summary. Exige publicaciones revisadas por otra persona y confirma registro,
+vínculo de cuestionario y auditoría en una sola transacción. La versión esperada
+impide ganar dos activaciones concurrentes. Repetir un evento devuelve su versión
+histórica sin retroceder el registro; una activación antigua hecha por SQL no se
+adopta retroactivamente como una activación editorial atómica.
