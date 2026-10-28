@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/config"
+	"github.com/cazocarma/rac-user-service/internal/editorial"
 	httpapi "github.com/cazocarma/rac-user-service/internal/http"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
@@ -45,6 +46,17 @@ func main() {
 		go func() {
 			if err := authority.ListenAndServe(); err != nil {
 				log.Fatal("standing authority listener stopped")
+			}
+		}()
+	}
+	editorialServer, err := editorial.FromEnvironment()
+	if err != nil {
+		log.Fatal("invalid editorial ingress configuration")
+	}
+	if editorialServer != nil {
+		go func() {
+			if err := editorialServer.ListenAndServe(); err != nil {
+				log.Fatal("editorial listener stopped")
 			}
 		}()
 	}

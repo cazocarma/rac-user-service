@@ -45,3 +45,51 @@ Guardar/eliminar fotos obtiene el advisory lock transaccional compartido
 (726224,1). El agente de respaldo obtiene el exclusivo antes de exportar snapshot
 y copiar las fotos referenciadas. Mantener esta coordinacion al agregar otras
 rutas de escritura/limpieza de fotos. No copiar directamente volumenes en caliente.
+
+
+## Ingreso editorial interno (preparado, apagado)
+
+El listener separado de puerto 8083 acepta comandos del cliente staff para
+borrador, revisión y publicación de documentos. No se registra en el router
+público ni se agrega un puerto de host al stack. Rutas:
+
+- `POST /internal/documents/drafts`: id/evento/hash, tipo/versión/idioma, texto
+  exacto y material_change explícito.
+- `POST /internal/documents/reviews`: id/evento/hash y decisión approved/rejected;
+  no permite al autor revisar su propio borrador.
+- `POST /internal/documents/publications`: id/evento/hash; requiere la revisión
+  aprobada exacta y no activa por sí solo el registro de obligaciones.
+- `GET /internal/documents/{id}`: texto/hash y metadata de la revisión exacta,
+  incluido un borrador todavía no público, solo con permiso legal.
+- `GET /ready`: estado de la conexión/configuración de auditoría del principal
+  editorial, sin datos de documentos, identidades o cadenas.
+
+La firma/issuer/audiencia `rac-user-documents`, azp rac-staff, rol de cliente
+legal y MFA reciente se verifican mediante rac-platform/staff. Actor se deriva
+del contexto verificado y política de la configuración; el JSON rechaza campos
+que pretendan imponerlos, propiedades repetidas (también variantes de mayúsculas),
+valores adicionales, texto no UTF-8 y cuerpos mayores de 1 MiB. Texto de borrador:
+máximo 131072 bytes UTF-8, no blanco ni NUL, con SHA256 exacto. Cada comando
+comparte transacción con auditoría y comprueba otra vez permiso/vencimiento antes
+de commit. Esperas se acotan a cinco segundos y al vencimiento del token/MFA;
+un reintento idéntico conserva el primer resultado. No se repite automáticamente.
+
+Configuración: DOCUMENT_EDITORIAL_ENABLED=false por defecto. Para prepararlo se
+requieren DOCUMENT_EDITORIAL_DATABASE_URL (sin fallback al usuario normal),
+DOCUMENT_EDITORIAL_POLICY_VERSION (referencia UUID no nula autorizada por el
+operador), OIDC_ISSUER y OIDC_JWKS_URL. No se toma política del cuerpo ni se
+certifica su aprobación jurídica por ser un UUID válido. Un valor ambiguo del
+flag o credenciales amplias detiene la activación. La conexión dedicada no puede
+ser superusuario/creador de roles, miembro de otros roles ni tener lectura/DML
+sobre tablas de negocio; tampoco ejecución directa de audit.append, activate o
+el helper de eventos. Se permite metadata de catálogo/extensiones. Su perfil de
+provisión consiste en USAGE de los esquemas necesarios y EXECUTE de los tres
+comandos, read_editorial_document y editorial_ready, sin grants de tablas.
+El escritor/chain de auditoría se provisiona por el operador y se verifica al
+iniciar; su pérdida vuelve readiness a 503 y revierte cualquier escritura.
+
+La migración no crea ese login ni lo asigna a los roles actuales, y este
+incremento no agrega el flag a overlays. El cliente staff continúa deshabilitado
+hasta el enrolamiento/activación aprobados; preparar la audiencia no concede roles.
+Faltan la provisión operativa, proxy/consola de revisión y activación del conjunto
+y del cuestionario. No hay semillas jurídicas ni cambios en DEV persistente.

@@ -136,11 +136,13 @@ github.com/bytedance/sonic/loader/internal/iasm/x86_64
 github.com/bytedance/sonic/loader/internal/rt
 # github.com/cazocarma/rac-platform v0.13.0
 ## explicit; go 1.27.2
+github.com/cazocarma/rac-platform/audit
 github.com/cazocarma/rac-platform/documents
 github.com/cazocarma/rac-platform/documents/postgres
 github.com/cazocarma/rac-platform/documents/transport
 github.com/cazocarma/rac-platform/internal/authorityhttp
 github.com/cazocarma/rac-platform/policy
+github.com/cazocarma/rac-platform/staff
 github.com/cazocarma/rac-platform/standing
 github.com/cazocarma/rac-platform/standing/postgres
 github.com/cazocarma/rac-platform/standing/transport
