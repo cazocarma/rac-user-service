@@ -275,12 +275,45 @@ func TestEditorialPostgresHTTP(t *testing.T) {
 		t.Fatal("expiry did not occur after a real audit insert", probe, err)
 	}
 	s.now = time.Now
+	for _, path := range []string{"/internal/documents/registry/es", "/internal/documents/registry/en"} {
+		result := send("GET", path, reviewer, nil, 200)
+		var head map[string]int64
+		if json.NewDecoder(result.Body).Decode(&head) != nil || len(head) != 1 || head["registry_version"] != 0 {
+			t.Fatal("initial registry head not readable through dedicated login")
+		}
+	}
+	send("GET", "/internal/documents/registry/xx", reviewer, nil, 400)
+	send("GET", "/internal/documents/registry/es?actor=other", reviewer, nil, 400)
 	testAssessmentBundleHTTP(t, admin, s, token)
+	result := send("GET", "/internal/documents/registry/es", reviewer, nil, 200)
+	var head map[string]int64
+	if json.NewDecoder(result.Body).Decode(&head) != nil || head["registry_version"] != 4 {
+		t.Fatal("registry read did not observe committed activations")
+	}
 	exec("DELETE FROM audit.writer_principals WHERE database_role='rac_editorial_fixture'")
 	send("GET", "/ready", author, nil, 503)
 	late["version"] = "unavailable-audit"
 	send("POST", "/internal/documents/drafts", author, late, 503)
 	if err := admin.QueryRow("SELECT count(*) FROM legal_documents WHERE version='unavailable-audit'").Scan(&count); err != nil || count != 0 {
 		t.Fatal("unaudited draft persisted")
+	}
+}
+
+func TestRegistryReadGuardsRunBeforeDatabase(t *testing.T) {
+	access, token := fixtureAccess(t)
+	handler := (&Server{access: access, policy: policy, now: time.Now}).Handler()
+	for _, test := range []struct {
+		path, bearer string
+		status       int
+	}{
+		{"/internal/documents/registry/es", "", 401},
+		{"/internal/documents/registry/es", token(author, "business_admin", staff.DocumentsAudience), 403},
+		{"/internal/documents/registry/es", token(author, "legal", staff.AdminAudience), 401},
+		{"/internal/documents/registry/xx", token(author, "legal", staff.DocumentsAudience), 400},
+		{"/internal/documents/registry/es?actor=other", token(author, "legal", staff.DocumentsAudience), 400},
+	} {
+		if w := request(t, handler, "GET", test.path, test.bearer, nil); w.Code != test.status {
+			t.Fatal("registry guard failed", w.Code, test.status)
+		}
 	}
 }

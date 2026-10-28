@@ -31,9 +31,10 @@ const reviewSignature = "documents.review_document(audit.reference,audit.referen
 const publishSignature = "documents.publish_document(audit.reference,audit.reference,audit.reference,audit.reference,audit.digest)"
 const readSignature = "documents.read_editorial_document(uuid)"
 const readySignature = "documents.editorial_ready()"
+const registryReadSignature = "documents.read_editorial_registry(text)"
 
 var requiredSignatures = []string{draftSignature, reviewSignature, publishSignature, readSignature, readySignature,
-	assessmentDraftSignature, assessmentReviewSignature, assessmentPublishSignature, assessmentReadSignature, bundleSignature}
+	assessmentDraftSignature, assessmentReviewSignature, assessmentPublishSignature, assessmentReadSignature, bundleSignature, registryReadSignature}
 
 type Server struct {
 	db     *sql.DB
@@ -101,6 +102,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /internal/documents/reviews", s.access.Require(staff.DocumentsApprove, http.HandlerFunc(s.review)))
 	mux.Handle("POST /internal/documents/publications", s.access.Require(staff.DocumentsPublish, http.HandlerFunc(s.publish)))
 	mux.Handle("GET /internal/documents/{id}", s.access.Require(staff.DocumentsRead, http.HandlerFunc(s.read)))
+	mux.Handle("GET /internal/documents/registry/{locale}", s.access.Require(staff.DocumentsRead, http.HandlerFunc(s.readRegistry)))
 	mux.Handle("POST /internal/assessments/drafts", s.access.Require(staff.DocumentsDraft, http.HandlerFunc(s.draftAssessment)))
 	mux.Handle("POST /internal/assessments/reviews", s.access.Require(staff.DocumentsApprove, http.HandlerFunc(s.reviewAssessment)))
 	mux.Handle("POST /internal/assessments/publications", s.access.Require(staff.DocumentsPublish, http.HandlerFunc(s.publishAssessment)))
@@ -267,6 +269,28 @@ func (s *Server) publish(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) read(w http.ResponseWriter, r *http.Request) {
 	s.readResource(w, r, "SELECT documents.read_editorial_document($1)")
+}
+func (s *Server) readRegistry(w http.ResponseWriter, r *http.Request) {
+	locale := r.PathValue("locale")
+	if (locale != "es" && locale != "en") || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		problem(w, 400, "invalid_editorial_command")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var version int64
+	if err := s.db.QueryRowContext(ctx, "SELECT documents.read_editorial_registry($1)", locale).Scan(&version); err != nil || version < 0 {
+		problem(w, 503, "editorial_unavailable")
+		return
+	}
+	session, _ := staff.Principal(r.Context())
+	if err := session.Check(staff.DocumentsRead, s.now()); err != nil {
+		fail(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int64{"registry_version": version})
 }
 func (s *Server) readResource(w http.ResponseWriter, r *http.Request, query string) {
 	if !audit.ValidID(r.PathValue("id")) {

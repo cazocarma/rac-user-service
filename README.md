@@ -83,7 +83,7 @@ flag o credenciales amplias detiene la activación. La conexión dedicada no pue
 ser superusuario/creador de roles, miembro de otros roles ni tener lectura/DML
 sobre tablas de negocio; tampoco ejecución directa de audit.append, activate o
 el helper de eventos. Se permite metadata de catálogo/extensiones. Su perfil de
-provisión consiste en USAGE de los esquemas necesarios y EXECUTE de las diez
+provisión consiste en USAGE de los esquemas necesarios y EXECUTE de las once
 funciones comprobadas por internal/editorial.requiredSignatures, sin grants de tablas.
 El escritor/chain de auditoría se provisiona por el operador y se verifica al
 iniciar; su pérdida vuelve readiness a 503 y revierte cualquier escritura.
@@ -111,3 +111,9 @@ vínculo de cuestionario y auditoría en una sola transacción. La versión espe
 impide ganar dos activaciones concurrentes. Repetir un evento devuelve su versión
 histórica sin retroceder el registro; una activación antigua hecha por SQL no se
 adopta retroactivamente como una activación editorial atómica.
+
+GET /internal/documents/registry/{locale} devuelve solo registry_version para es
+o en, con permiso DocumentsRead y no-store. Requiere V037 y EXECUTE adicional
+de documents.read_editorial_registry(text), sin SELECT sobre documents.head.
+La lectura no reserva la versión: activate_editorial_bundle sigue realizando
+la comparación y actualización atómicas. No acepta parámetros de consulta.
