@@ -92,7 +92,9 @@ func (s *Server) savePhoto(c *gin.Context) {
 		return
 	}
 	var previous sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
+	// Serialize photo/profile writers without blocking FK references created by
+	// a concurrent sanction. The referenced identity key is never edited here.
+	err = tx.QueryRowContext(ctx, `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR NO KEY UPDATE`, platform.Principal(c).Subject).Scan(&previous)
 	if err == sql.ErrNoRows {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return
@@ -164,7 +166,7 @@ func (s *Server) deletePhoto(c *gin.Context) {
 		return
 	}
 	var previous sql.NullString
-	err = tx.QueryRowContext(c.Request.Context(), `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject).Scan(&previous)
+	err = tx.QueryRowContext(c.Request.Context(), `SELECT foto_clave FROM usuario WHERE keycloak_id=$1 FOR NO KEY UPDATE`, platform.Principal(c).Subject).Scan(&previous)
 	if err == sql.ErrNoRows {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return

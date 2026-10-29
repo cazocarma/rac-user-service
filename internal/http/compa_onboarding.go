@@ -146,7 +146,8 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 	defer tx.Rollback()
 	var userID string
 	// Serialize own profile edits. No caller-provided user id or role is accepted.
-	err = tx.QueryRowContext(ctx, `SELECT id::text FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, principal.Subject).Scan(&userID)
+	// Preserve FK KEY SHARE access for concurrent standing/session effects.
+	err = tx.QueryRowContext(ctx, `SELECT id::text FROM usuario WHERE keycloak_id=$1 FOR NO KEY UPDATE`, principal.Subject).Scan(&userID)
 	if err == sql.ErrNoRows {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return

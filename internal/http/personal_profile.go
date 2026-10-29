@@ -92,8 +92,13 @@ func (s *Server) saveMe(c *gin.Context) {
 	defer tx.Rollback()
 	// Serialize against other updates and distinguish private contact edits
 	// from changes to fields actually rendered in the public compa card.
+	// Editable fields cannot change the referenced identity key. NO KEY UPDATE
+	// still serializes profile writers, but permits the foreign-key KEY SHARE
+	// taken when a concurrent sanction records its session-revocation effect.
+	// FOR UPDATE would hold that sanction until this permit expires, preventing
+	// the final standing check from observing the committed revocation.
 	var publicChanged bool
-	err = tx.QueryRowContext(ctx, `SELECT nombre IS DISTINCT FROM $2 OR biografia IS DISTINCT FROM $3 OR COALESCE(intereses,'{}'::text[]) IS DISTINCT FROM $4::text[] FROM usuario WHERE keycloak_id=$1 FOR UPDATE`, platform.Principal(c).Subject, body.Name, body.Biography, pq.Array(body.Interests)).Scan(&publicChanged)
+	err = tx.QueryRowContext(ctx, `SELECT nombre IS DISTINCT FROM $2 OR biografia IS DISTINCT FROM $3 OR COALESCE(intereses,'{}'::text[]) IS DISTINCT FROM $4::text[] FROM usuario WHERE keycloak_id=$1 FOR NO KEY UPDATE`, platform.Principal(c).Subject, body.Name, body.Biography, pq.Array(body.Interests)).Scan(&publicChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(409, gin.H{"error": "profile_required"})
 		return
