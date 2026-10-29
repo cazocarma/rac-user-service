@@ -206,6 +206,17 @@ func TestEditorialPostgresHTTP(t *testing.T) {
 		t.Fatal("unrelated private read permission accepted")
 	}
 	exec("REVOKE SELECT ON public.usuario FROM rac_editorial_fixture;")
+	for _, grants := range [][2]string{
+		{"GRANT SELECT(nombre) ON public.usuario TO rac_editorial_fixture", "REVOKE SELECT(nombre) ON public.usuario FROM rac_editorial_fixture"},
+		{"GRANT CREATE ON SCHEMA documents TO rac_editorial_fixture", "REVOKE CREATE ON SCHEMA documents FROM rac_editorial_fixture"},
+		{"GRANT EXECUTE ON FUNCTION public.editorial_fixture_probe() TO rac_editorial_fixture", "REVOKE EXECUTE ON FUNCTION public.editorial_fixture_probe() FROM rac_editorial_fixture"},
+	} {
+		exec(grants[0])
+		if _, err := New(context.Background(), db, access, policy); err == nil {
+			t.Fatal("editorial startup accepted additional authority")
+		}
+		exec(grants[1])
+	}
 	s, err := New(context.Background(), db, access, policy)
 	if err != nil {
 		t.Fatal("scoped editorial login rejected", err)
