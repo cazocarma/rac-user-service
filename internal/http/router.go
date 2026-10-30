@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cazocarma/rac-user-service/internal/config"
+	"github.com/cazocarma/rac-user-service/internal/identity"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/cazocarma/rac-user-service/internal/repo"
@@ -33,6 +34,7 @@ type Server struct {
 	cfg             config.Config
 	security        *platform.Security
 	grantCompa      func(context.Context, string) error
+	identity        *identity.Service
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
@@ -60,6 +62,9 @@ func (s *Server) Router() *gin.Engine {
 	api.POST("/me/documents/acceptances", s.security.Require("cliente"), s.acceptDocuments)
 	api.GET("/me/compa/attestation", s.security.Require("cliente"), s.ownAssessment)
 	api.POST("/me/compa/attestation", s.security.Require("cliente"), s.submitAssessment)
+	api.GET("/me/identity", s.security.Require("cliente"), s.ownIdentity)
+	api.POST("/me/identity/sessions", s.security.Require("cliente"), s.startIdentity)
+	api.POST("/identity/webhook", s.identityWebhook)
 	{
 		// Compas
 		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
@@ -312,8 +317,8 @@ func (s *Server) me(c *gin.Context) {
 		c.JSON(403, gin.H{"error": "email_required"})
 		return
 	}
-	err := s.db.QueryRowContext(c, `INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,verificado)
- VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) ON CONFLICT(keycloak_id) DO UPDATE SET rol=EXCLUDED.rol,correo=EXCLUDED.correo,verificado=EXCLUDED.verificado RETURNING id::text,nombre,COALESCE(telefono,''),COALESCE(pais,''),COALESCE(region,''),COALESCE(ciudad,''),COALESCE(intereses,'{}'::text[]),biografia,COALESCE(foto_clave,'')`, name, p.Email, p.Role(), p.Subject, p.EmailVerified).Scan(&id, &storedName, &phone, &country, &region, &city, pq.Array(&interests), &biography, &photoVersion)
+	err := s.db.QueryRowContext(c, `INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,email_verified)
+ VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) ON CONFLICT(keycloak_id) DO UPDATE SET rol=EXCLUDED.rol,correo=EXCLUDED.correo,email_verified=EXCLUDED.email_verified RETURNING id::text,nombre,COALESCE(telefono,''),COALESCE(pais,''),COALESCE(region,''),COALESCE(ciudad,''),COALESCE(intereses,'{}'::text[]),biografia,COALESCE(foto_clave,'')`, name, p.Email, p.Role(), p.Subject, p.EmailVerified).Scan(&id, &storedName, &phone, &country, &region, &city, pq.Array(&interests), &biography, &photoVersion)
 	if err != nil {
 		c.JSON(409, gin.H{"error": "identity_conflict"})
 		return

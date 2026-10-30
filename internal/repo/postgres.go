@@ -35,7 +35,7 @@ type ProfileInput struct {
 func (r *Repo) UpsertProfileByKeycloak(ctx context.Context, keycloakID string, in ProfileInput, beforeCommit ...func(context.Context, *sql.Tx) error) error {
 	// Build geometry from WKT when provided
 	var args []any
-	q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, verificado, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
+	q := `INSERT INTO usuario (id, nombre, correo, rol, keycloak_id, email_verified, fecha_nacimiento, genero, telefono, pais, region, ciudad, direccion, intereses, idioma_preferido, notificaciones_activadas, foto_perfil, ubicacion, radio_busqueda_km)
 VALUES (gen_random_uuid(), $1, $2, 'cliente', $3, false, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13,false), $14, %s, $16)
 ON CONFLICT (keycloak_id) DO UPDATE SET
   nombre=EXCLUDED.nombre,
