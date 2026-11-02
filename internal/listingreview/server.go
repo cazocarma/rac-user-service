@@ -30,28 +30,38 @@ const revisionSignature = "listing_review.revision(audit.reference,audit.referen
 var signatures = []string{readySignature, queueSignature, revisionSignature}
 
 func rolePolicy() staffdb.RolePolicy {
-	return staffdb.RolePolicy{Functions: signatures, ForbiddenRoles: []string{"postgres", "rac_user", "rac_match", "rac_chat", "rac_admin", "rac_alert", "rac_migrator", "rac_backup", "rac_seed", "rac_documents_editorial"}}
+	return functionPolicy(signatures)
+}
+
+func functionPolicy(functions []string) staffdb.RolePolicy {
+	return staffdb.RolePolicy{Functions: append([]string(nil), functions...), ForbiddenRoles: []string{"postgres", "rac_user", "rac_match", "rac_chat", "rac_admin", "rac_alert", "rac_migrator", "rac_backup", "rac_seed", "rac_documents_editorial"}}
 }
 
 type Server struct {
-	db     *sql.DB
-	access *staff.Access
-	policy string
-	now    func() time.Time
+	db        *sql.DB
+	access    *staff.Access
+	policy    string
+	now       func() time.Time
+	authority staffdb.RolePolicy
+	readiness string
 }
 
 func New(ctx context.Context, db *sql.DB, access *staff.Access, policy string) (*Server, error) {
+	return newServer(ctx, db, access, policy, rolePolicy())
+}
+
+func newServer(ctx context.Context, db *sql.DB, access *staff.Access, policy string, authority staffdb.RolePolicy) (*Server, error) {
 	if db == nil || access == nil || !audit.ValidID(policy) {
 		return nil, errors.New("invalid listing review configuration")
 	}
-	if err := staffdb.CheckRole(ctx, db, rolePolicy()); err != nil {
+	if err := staffdb.CheckRole(ctx, db, authority); err != nil {
 		return nil, errors.New("listing review database privileges not isolated")
 	}
 	var ready bool
 	if err := db.QueryRowContext(ctx, `SELECT listing_review.ready()`).Scan(&ready); err != nil || !ready {
 		return nil, errors.New("listing review database not ready")
 	}
-	return &Server{db: db, access: access, policy: policy, now: time.Now}, nil
+	return &Server{db: db, access: access, policy: policy, now: time.Now, authority: authority, readiness: `SELECT listing_review.ready()`}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -75,7 +85,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	var ready bool
-	if s.db == nil || staffdb.CheckRole(ctx, s.db, rolePolicy()) != nil || s.db.QueryRowContext(ctx, `SELECT listing_review.ready()`).Scan(&ready) != nil || !ready {
+	if s.db == nil || staffdb.CheckRole(ctx, s.db, s.authority) != nil || s.db.QueryRowContext(ctx, s.readiness).Scan(&ready) != nil || !ready {
 		problem(w, 503, "listing_review_unavailable")
 		return
 	}
@@ -149,39 +159,45 @@ func (s *Server) read(w http.ResponseWriter, r *http.Request, query string, args
 		problem(w, 503, "listing_review_unavailable")
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-	defer cancel()
-	if staffdb.CheckRole(ctx, s.db, rolePolicy()) != nil {
-		problem(w, 503, "listing_review_unavailable")
-		return nil, false
-	}
-	if err = session.Check(staff.ListingsRead, s.now()); err != nil {
-		status, code := staff.Failure(err)
-		problem(w, status, code)
-		return nil, false
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		problem(w, 503, "listing_review_unavailable")
-		return nil, false
-	}
-	defer tx.Rollback()
 	parameters := append([]any{id, session.Subject, s.policy}, args...)
-	var raw []byte
-	if err = tx.QueryRowContext(ctx, query, parameters...).Scan(&raw); err != nil || len(raw) > 128*1024 {
-		problem(w, 503, "listing_review_unavailable")
-		return nil, false
-	}
-	if err = session.Check(staff.ListingsRead, s.now()); err != nil {
-		status, code := staff.Failure(err)
-		problem(w, status, code)
-		return nil, false
-	}
-	if tx.Commit() != nil {
-		problem(w, 503, "listing_review_unavailable")
+	raw, err := s.transaction(r.Context(), session, staff.ListingsRead, query, parameters...)
+	if err != nil {
+		reviewFailure(w, err)
 		return nil, false
 	}
 	return raw, true
+}
+
+// Both private ingresses share the same role/session/commit boundary. The
+// correction credential has no queue/detail authority and vice versa.
+func (s *Server) transaction(parent context.Context, session staff.Session, permission staff.Permission, query string, parameters ...any) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	if staffdb.CheckRole(ctx, s.db, s.authority) != nil {
+		return nil, errUnavailable
+	}
+	if err := session.Check(permission, s.now()); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, errUnavailable
+	}
+	defer tx.Rollback()
+	var raw []byte
+	if err = tx.QueryRowContext(ctx, query, parameters...).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if len(raw) > 128*1024 || (len(raw) > 0 && !json.Valid(raw)) {
+		return nil, errUnavailable
+	}
+	if err = session.Check(permission, s.now()); err != nil {
+		return nil, err
+	}
+	if tx.Commit() != nil {
+		return nil, errUnavailable
+	}
+	return raw, nil
 }
 
 func noBody(r *http.Request) bool { return r.ContentLength == 0 && len(r.TransferEncoding) == 0 }

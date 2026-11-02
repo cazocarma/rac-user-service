@@ -31,7 +31,7 @@ func TestReaderNotOnPublicRouter(t *testing.T) {
 	}
 }
 
-func readerAccess(t *testing.T) (*staff.Access, func(string, string) string) {
+func readerAccess(t *testing.T) (*staff.Access, func(string, string, ...string) string) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -45,9 +45,12 @@ func readerAccess(t *testing.T) (*staff.Access, func(string, string) string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return access, func(role, audience string) string {
+	return access, func(role, audience string, subjects ...string) string {
 		now := time.Now().Unix()
 		claims := jwt.MapClaims{"iss": "https://fixture.example/realms/rac", "aud": audience, "sub": fixtureID, "typ": "Bearer", "azp": staff.ClientID, "iat": now, "exp": now + 120, "auth_time": now - 30, "amr": []string{"pwd", "otp"}, "resource_access": map[string]any{staff.ClientID: map[string]any{"roles": []string{role}}}, "realm_access": map[string]any{"roles": []string{"admin"}}}
+		if len(subjects) > 0 {
+			claims["sub"] = subjects[0]
+		}
 		signed := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 		signed.Header["kid"] = "reader-fixture"
 		value, err := signed.SignedString(key)
