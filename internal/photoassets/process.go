@@ -134,7 +134,14 @@ func (p *Processor) Process(ctx context.Context, source Source, reader Reader) (
 		RiskScore           int                   `json:"risk_score"`
 		Disposition         string                `json:"disposition"`
 		PendingChecks       []string              `json:"pending_checks"`
-	}{source.id, p.version, FullNormalizerVersion, hex.EncodeToString(source.digest[:]), hex.EncodeToString(digest[:]), metadata.Width, metadata.Height, recognized.Version, recognized.ModelSHA256, recognized.ExecutableSHA256, signals, risk, disposition, []string{"banned_image_similarity", "human_review"}}
+	}{
+		SourceID: source.id, PipelineVersion: p.version, NormalizerVersion: FullNormalizerVersion,
+		SourceSHA256: hex.EncodeToString(source.digest[:]), NormalizedSHA256: hex.EncodeToString(digest[:]),
+		Width: metadata.Width, Height: metadata.Height, OCRVersion: recognized.Version,
+		OCRModelSHA256: recognized.ModelSHA256, OCRExecutableSHA256: recognized.ExecutableSHA256,
+		Analysis: signals, RiskScore: risk, Disposition: disposition,
+		PendingChecks: []string{"banned_image_similarity", "human_review"},
+	}
 	encoded, err := json.Marshal(proof)
 	if err != nil || len(encoded) > 32768 {
 		return Processed{}, ErrProcessing
