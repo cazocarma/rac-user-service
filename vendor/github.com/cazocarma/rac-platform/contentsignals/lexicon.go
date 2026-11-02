@@ -2,7 +2,9 @@ package contentsignals
 
 import (
 	"errors"
+	"math"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -16,9 +18,15 @@ const (
 	CategoryOffplatformPayment = "offplatform_payment"
 )
 
-// LexiconCategories are evaluated only when a lexicon supplies rules; an
-// empty category is reported as unevaluated, never as passed.
-var LexiconCategories = []string{CategoryDrugs, CategorySexualServices, CategoryWeapons, CategoryViolence, CategoryMinors, CategoryOffplatformPayment}
+var supportedLexiconCategories = [...]string{CategoryDrugs, CategorySexualServices, CategoryWeapons, CategoryViolence, CategoryMinors, CategoryOffplatformPayment}
+
+// Categories returns an independent copy. A category without curated rules is
+// unevaluated, never passed. Callers cannot rewrite the engine's policy domain.
+func Categories() []string { return slices.Clone(supportedLexiconCategories[:]) }
+
+// LexiconCategories is a compatibility copy; changes do not affect analysis.
+// Deprecated: use Categories to obtain an independent copy.
+var LexiconCategories = Categories()
 
 var (
 	ErrInvalidLexicon = errors.New("invalid content lexicon")
@@ -51,12 +59,12 @@ func (l Lexicon) Validate() error {
 		return ErrInvalidLexicon
 	}
 	known := map[string]bool{}
-	for _, c := range LexiconCategories {
+	for _, c := range supportedLexiconCategories {
 		known[c] = true
 	}
 	seen := map[string]bool{}
 	for _, r := range l.Rules {
-		if !ruleIDPattern.MatchString(r.ID) || seen[r.ID] || !known[r.Category] || r.Weight <= 0 || r.Weight > 1 || len(r.Terms) == 0 {
+		if !ruleIDPattern.MatchString(r.ID) || seen[r.ID] || !known[r.Category] || math.IsNaN(r.Weight) || math.IsInf(r.Weight, 0) || r.Weight <= 0 || r.Weight > 1 || len(r.Terms) == 0 {
 			return ErrInvalidLexicon
 		}
 		seen[r.ID] = true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -71,6 +72,15 @@ func New(lexicon Lexicon) (*Engine, error) {
 	if err := lexicon.Validate(); err != nil {
 		return nil, err
 	}
+	// Hot reload builds another engine. Callers must not be able to change the
+	// current snapshot or its unevaluated categories by reusing input buffers.
+	rules := slices.Clone(lexicon.Rules)
+	for i := range rules {
+		rules[i].Terms = slices.Clone(rules[i].Terms)
+		rules[i].RequiresAny = slices.Clone(rules[i].RequiresAny)
+		rules[i].ExcludeIfAny = slices.Clone(rules[i].ExcludeIfAny)
+	}
+	lexicon.Rules = rules
 	return &Engine{lexicon: lexicon, rules: compile(lexicon)}, nil
 }
 
@@ -89,7 +99,7 @@ func (e *Engine) Analyze(ctx context.Context, input string) (Result, error) {
 		covered[r.Category] = true
 	}
 	unevaluated := []string{}
-	for _, c := range LexiconCategories {
+	for _, c := range supportedLexiconCategories {
 		if !covered[c] {
 			unevaluated = append(unevaluated, c)
 		}
