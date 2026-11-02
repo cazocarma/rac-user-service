@@ -278,6 +278,9 @@ func (s *Server) publishCompa(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_body"})
 		return
 	}
+	if rejectPublicContact(c, publicText{"descripcion", body.Descripcion}) {
+		return
+	}
 	var id string
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

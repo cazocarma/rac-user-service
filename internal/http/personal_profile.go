@@ -79,6 +79,9 @@ func (s *Server) saveMe(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_profile"})
 		return
 	}
+	if rejectPublicContact(c, publicText{"nombre", body.Name}, publicText{"biografia", body.Biography}, publicText{"intereses", strings.Join(body.Interests, " ")}) {
+		return
+	}
 	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: platform.Principal(c).Subject, Capability: standing.PublishListing})
 	defer cancel()
 	if !ok {

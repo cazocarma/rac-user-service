@@ -117,10 +117,18 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
+	if rejectPublicContact(c, publicText{"descripcion", body.Description}) {
+		return
+	}
 	activities, err := repo.NormalizeActivities(body.Activities, s.catalog)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "invalid_activities"})
 		return
+	}
+	for _, activity := range activities {
+		if rejectPublicContact(c, publicText{"actividades.nota", activity.Note}) {
+			return
+		}
 	}
 	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: principal.Subject, Capability: standing.PublishListing})
 	defer cancel()
