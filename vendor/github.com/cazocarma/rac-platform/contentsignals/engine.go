@@ -10,7 +10,9 @@ import (
 
 // AnalyzerVersion changes whenever normalization or detectors change, so a
 // stored result can be traced to the code that produced it.
-const AnalyzerVersion = "contentsignals/1"
+// Version 2 records the patched Unicode normalization dependency; historical
+// results from version 1 must not silently acquire this implementation.
+const AnalyzerVersion = "contentsignals/2"
 
 var ErrTooLarge = errors.New("content exceeds analysis limit")
 

@@ -35,13 +35,21 @@ type Processor struct {
 	version  string
 	ocr      OCR
 	analyzer contentsignals.Analyzer
+	matcher  *ImageMatcher
 }
 
-func NewProcessor(version string, ocr OCR, analyzer contentsignals.Analyzer) (*Processor, error) {
+func NewProcessor(version string, ocr OCR, analyzer contentsignals.Analyzer, matchers ...*ImageMatcher) (*Processor, error) {
 	if !versionPattern.MatchString(version) || ocr == nil || analyzer == nil {
 		return nil, ErrInvalid
 	}
-	return &Processor{version: version, ocr: ocr, analyzer: analyzer}, nil
+	if len(matchers) > 1 || (len(matchers) == 1 && matchers[0] == nil) {
+		return nil, ErrInvalid
+	}
+	processor := &Processor{version: version, ocr: ocr, analyzer: analyzer}
+	if len(matchers) == 1 {
+		processor.matcher = matchers[0]
+	}
+	return processor, nil
 }
 
 type Processed struct {
@@ -114,6 +122,24 @@ func (p *Processor) Process(ctx context.Context, source Source, reader Reader) (
 	for _, score := range signals.Scores() {
 		risk = max(risk, int(math.Ceil(score*100)))
 	}
+	fingerprints, err := Fingerprint(ctx, normalized)
+	if err != nil {
+		return Processed{}, err
+	}
+	similarity := Similarity{State: "not_configured", Matches: []ImageMatch{}}
+	pending := []string{"banned_image_similarity", "human_review"}
+	if p.matcher != nil {
+		similarity, err = p.matcher.Compare(ctx, fingerprints)
+		if err != nil {
+			return Processed{}, err
+		}
+		if similarity.State == "evaluated" {
+			pending = []string{"human_review"}
+		}
+		if len(similarity.Matches) > 0 {
+			risk = max(risk, p.matcher.policy.MatchRisk)
+		}
+	}
 	metadata, err := jpeg.DecodeConfig(bytes.NewReader(normalized))
 	if err != nil {
 		return Processed{}, ErrProcessing
@@ -134,13 +160,15 @@ func (p *Processor) Process(ctx context.Context, source Source, reader Reader) (
 		RiskScore           int                   `json:"risk_score"`
 		Disposition         string                `json:"disposition"`
 		PendingChecks       []string              `json:"pending_checks"`
+		Fingerprints        json.RawMessage       `json:"fingerprints"`
+		Similarity          Similarity            `json:"similarity"`
 	}{
 		SourceID: source.id, PipelineVersion: p.version, NormalizerVersion: FullNormalizerVersion,
 		SourceSHA256: hex.EncodeToString(source.digest[:]), NormalizedSHA256: hex.EncodeToString(digest[:]),
 		Width: metadata.Width, Height: metadata.Height, OCRVersion: recognized.Version,
 		OCRModelSHA256: recognized.ModelSHA256, OCRExecutableSHA256: recognized.ExecutableSHA256,
 		Analysis: signals, RiskScore: risk, Disposition: disposition,
-		PendingChecks: []string{"banned_image_similarity", "human_review"},
+		PendingChecks: pending, Fingerprints: fingerprints.JSON(), Similarity: similarity,
 	}
 	encoded, err := json.Marshal(proof)
 	if err != nil || len(encoded) > 32768 {
