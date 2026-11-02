@@ -15,18 +15,32 @@ import (
 
 const MaxBytes = 5 * 1024 * 1024
 
-func Normalize(raw []byte, mediaType string) ([]byte, error) {
+// Metadata describes the source header, not a decoded, sanitized or approved
+// photo. Originals remain private; Normalize must still decode and reencode.
+type Metadata struct {
+	Width, Height int
+	MediaType     string
+}
+
+func Inspect(raw []byte, mediaType string) (Metadata, error) {
 	if len(raw) == 0 || len(raw) > MaxBytes {
-		return nil, errors.New("photo_size")
+		return Metadata{}, errors.New("photo_size")
 	}
 	config, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	expected := map[string]string{"image/jpeg": "jpeg", "image/png": "png"}[mediaType]
 	if err != nil || expected == "" || format != expected {
-		return nil, errors.New("photo_format")
+		return Metadata{}, errors.New("photo_format")
 	}
 	// Validate dimensions before allocating decoded pixels (decompression bombs).
 	if config.Width < 32 || config.Height < 32 || config.Width > 4096 || config.Height > 4096 || int64(config.Width)*int64(config.Height) > 12000000 {
-		return nil, errors.New("photo_dimensions")
+		return Metadata{}, errors.New("photo_dimensions")
+	}
+	return Metadata{Width: config.Width, Height: config.Height, MediaType: mediaType}, nil
+}
+
+func Normalize(raw []byte, mediaType string) ([]byte, error) {
+	if _, err := Inspect(raw, mediaType); err != nil {
+		return nil, err
 	}
 	img, err := imaging.Decode(bytes.NewReader(raw), imaging.AutoOrientation(true))
 	if err != nil {

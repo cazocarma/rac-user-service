@@ -20,7 +20,7 @@ func TestLocalSafety(t *testing.T) {
 	if err := s.Put(ctx, key, []byte("image")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put(ctx, key, []byte("overwrite")); err == nil {
+	if err := s.Put(ctx, key, []byte("overwrite")); !errors.Is(err, ErrExists) {
 		t.Fatal("existing photo overwritten")
 	}
 	raw, err := s.Get(ctx, key)

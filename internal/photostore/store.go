@@ -11,11 +11,15 @@ import (
 )
 
 var ErrNotFound = errors.New("photo not found")
+var ErrExists = errors.New("photo already exists")
+var ErrConflict = errors.New("photo creation conflicted")
 var validKey = regexp.MustCompile(`^[a-f0-9]{32}\.jpg$`)
 
 const MaxStoredBytes = 5 * 1024 * 1024
 
 type Store interface {
+	// Put creates a new object; it must never replace an existing key. This is
+	// an application contract, not retention/WORM against a privileged deletion.
 	Put(context.Context, string, []byte) error
 	Get(context.Context, string) ([]byte, error)
 	Delete(context.Context, string) error
@@ -37,6 +41,9 @@ func (l Local) Put(ctx context.Context, key string, data []byte) error {
 	}
 	path := filepath.Join(l.Directory, key)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if errors.Is(err, os.ErrExist) {
+		return ErrExists
+	}
 	if err != nil {
 		return err
 	}

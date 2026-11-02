@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,8 +18,10 @@ import (
 )
 
 type S3 struct {
-	client *s3.Client
-	bucket string
+	client     *s3.Client
+	bucket     string
+	keyPattern *regexp.Regexp
+	mediaType  string
 }
 
 func FromEnvironment() (Store, error) {
@@ -36,6 +39,10 @@ func FromEnvironment() (Store, error) {
 	}
 }
 func NewS3(endpoint, region, bucket, access, secret string) (*S3, error) {
+	return newS3(endpoint, region, bucket, access, secret, validKey, "image/jpeg")
+}
+
+func newS3(endpoint, region, bucket, access, secret string, keyPattern *regexp.Regexp, mediaType string) (*S3, error) {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || region == "" || bucket == "" || access == "" || secret == "" {
 		return nil, errors.New("incomplete or invalid profile S3 configuration")
@@ -45,17 +52,28 @@ func NewS3(endpoint, region, bucket, access, secret string) (*S3, error) {
 		Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(access, secret, "")),
 		HTTPClient:  &http.Client{Timeout: 8 * time.Second}, RetryMaxAttempts: 2,
 	})
-	return &S3{client: client, bucket: bucket}, nil
+	return &S3{client: client, bucket: bucket, keyPattern: keyPattern, mediaType: mediaType}, nil
 }
 func (s *S3) Put(ctx context.Context, key string, data []byte) error {
-	if !validKey.MatchString(key) || len(data) > MaxStoredBytes {
+	if !s.keyPattern.MatchString(key) || len(data) > MaxStoredBytes {
 		return errors.New("invalid photo")
 	}
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentType: aws.String("image/jpeg"), CacheControl: aws.String("no-store")})
+	// A HEAD-before-PUT check has a race. Let the object store enforce creation
+	// atomically, matching the local driver's O_EXCL contract.
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentType: aws.String(s.mediaType), CacheControl: aws.String("no-store"), IfNoneMatch: aws.String("*")})
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		switch api.ErrorCode() {
+		case "PreconditionFailed":
+			return ErrExists
+		case "ConditionalRequestConflict":
+			return ErrConflict
+		}
+	}
 	return err
 }
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
-	if !validKey.MatchString(key) {
+	if !s.keyPattern.MatchString(key) {
 		return nil, ErrNotFound
 	}
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
@@ -74,7 +92,7 @@ func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
 	return raw, err
 }
 func (s *S3) Delete(ctx context.Context, key string) error {
-	if !validKey.MatchString(key) {
+	if !s.keyPattern.MatchString(key) {
 		return errors.New("invalid photo key")
 	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})

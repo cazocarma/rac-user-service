@@ -6,14 +6,24 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 )
 
 func TestCopyPhotosIntegrityAndRetry(t *testing.T) {
-	dsn := os.Getenv("RAC_ONBOARDING_TEST_DATABASE_URL")
+	dsn := os.Getenv("RAC_PHOTO_MIGRATION_TEST_DATABASE_URL")
+	if dsn != "" {
+		parsed, err := url.Parse(dsn)
+		if err != nil || !strings.HasPrefix(parsed.Hostname(), "rac-photo-test-") || parsed.Path != "/photo_migration" {
+			t.Fatal("refusing non-disposable photo migration database")
+		}
+	} else {
+		dsn = os.Getenv("RAC_ONBOARDING_TEST_DATABASE_URL")
+	}
 	if dsn == "" {
 		t.Skip("requires disposable migrated DB")
 	}
