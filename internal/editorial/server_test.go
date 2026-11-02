@@ -190,6 +190,7 @@ func TestEditorialPostgresHTTP(t *testing.T) {
  INSERT INTO audit.writer_principals VALUES('rac_editorial_fixture','99999999-9999-4999-8999-999999999999','88888888-8888-4888-8888-888888888888');
  CREATE SEQUENCE public.editorial_fixture_probes;
  CREATE FUNCTION public.editorial_fixture_probe() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('public.editorial_fixture_probes'); RETURN NEW; END $$;
+ REVOKE ALL ON FUNCTION public.editorial_fixture_probe() FROM PUBLIC;
  CREATE TRIGGER editorial_fixture_probe AFTER INSERT ON audit.log FOR EACH ROW EXECUTE FUNCTION public.editorial_fixture_probe();`)
 	location.User = url.UserPassword("rac_editorial_fixture", "synthetic-editorial-only-123456")
 	db, err := sql.Open("postgres", location.String())

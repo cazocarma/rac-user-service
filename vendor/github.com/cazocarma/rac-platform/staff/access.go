@@ -17,6 +17,7 @@ import (
 const ClientID = "rac-staff"
 const AdminAudience = "rac-admin-staff"
 const DocumentsAudience = "rac-user-documents"
+const ListingsAudience = "rac-user-listings"
 const MaxAuthenticationAge = 5 * time.Minute
 
 type Permission string
@@ -28,6 +29,8 @@ const (
 	DocumentsApprove  Permission = "documents.approve"
 	DocumentsActivate Permission = "documents.activate"
 	DocumentsPublish  Permission = "documents.publish"
+	ListingsRead      Permission = "listings.read"
+	ListingsReview    Permission = "listings.review"
 )
 
 var (
@@ -76,7 +79,7 @@ func configuredURL(value string) bool {
 	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 func New(issuer, jwks, audience string) (*Access, error) {
-	if !configuredURL(issuer) || !configuredURL(jwks) || (audience != AdminAudience && audience != DocumentsAudience) {
+	if !configuredURL(issuer) || !configuredURL(jwks) || (audience != AdminAudience && audience != DocumentsAudience && audience != ListingsAudience) {
 		return nil, errors.New("invalid staff OIDC configuration")
 	}
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -111,13 +114,16 @@ func validate(c claims, now time.Time) (Session, error) {
 		c.IssuedAt <= 0 || c.IssuedAt > timestamp || c.ExpiresAt <= timestamp || c.ExpiresAt <= c.IssuedAt || c.ExpiresAt-c.IssuedAt > int64(MaxAuthenticationAge/time.Second) {
 		return Session{}, ErrUnauthorized
 	}
-	known, legal := false, false
+	known, legal, moderator := false, false, false
 	for _, role := range c.Resources[ClientID].Roles {
 		switch role {
 		case "legal":
 			legal = true
 			known = true
-		case "ts_agent", "ts_lead", "support", "business_admin":
+		case "ts_agent", "ts_lead":
+			moderator = true
+			known = true
+		case "support", "business_admin":
 			known = true
 		}
 	}
@@ -134,6 +140,9 @@ func validate(c claims, now time.Time) (Session, error) {
 	permissions := []Permission{SessionRead}
 	if legal {
 		permissions = append(permissions, DocumentsRead, DocumentsDraft, DocumentsApprove, DocumentsPublish, DocumentsActivate)
+	}
+	if moderator {
+		permissions = append(permissions, ListingsRead, ListingsReview)
 	}
 	expires := time.Unix(c.ExpiresAt, 0).UTC()
 	stepUpExpiry := time.Unix(c.AuthTime, 0).Add(MaxAuthenticationAge).UTC()

@@ -19,6 +19,7 @@ import (
 
 	"github.com/cazocarma/rac-platform/audit"
 	"github.com/cazocarma/rac-platform/staff"
+	staffdb "github.com/cazocarma/rac-platform/staff/postgres"
 	"github.com/cazocarma/rac-user-service/internal/strictjson"
 	"github.com/lib/pq"
 )
@@ -49,21 +50,16 @@ func New(ctx context.Context, db *sql.DB, access *staff.Access, policy string) (
 	if db == nil || access == nil || !audit.ValidID(policy) {
 		return nil, errors.New("invalid editorial configuration")
 	}
+	if err := staffdb.CheckRole(ctx, db, staffdb.RolePolicy{Functions: requiredSignatures,
+		ForbiddenRoles: []string{"rac_user", "rac_match", "rac_chat", "rac_alert", "rac_admin", "rac_backup", "rac_seed", "rac_migrator"}}); err != nil {
+		return nil, errors.New("editorial database privileges not isolated")
+	}
 	var allowed bool
-	err := db.QueryRowContext(ctx, `SELECT current_user=session_user AND NOT (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls)
- AND NOT EXISTS(SELECT FROM pg_auth_members m WHERE m.member=r.oid)
- AND session_user NOT IN('rac_user','rac_match','rac_chat','rac_alert','rac_backup','rac_seed','rac_migrator')
- AND NOT EXISTS(SELECT FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN('public','audit','documents','standing') AND c.relkind IN('r','p','v','m','f') AND NOT EXISTS(SELECT FROM pg_depend d WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e') AND (has_table_privilege(session_user,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(session_user,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')))
- AND NOT EXISTS(SELECT FROM pg_namespace n WHERE n.nspname IN('public','audit','documents','standing') AND has_schema_privilege(session_user,n.oid,'CREATE'))
- AND NOT EXISTS(SELECT FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
- CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) acl
- WHERE acl.grantee=r.oid AND acl.privilege_type='EXECUTE' AND n.nspname IN('public','audit','documents','standing')
- AND p.oid NOT IN(SELECT to_regprocedure(signature)::oid FROM unnest($1::text[]) signature))
- AND NOT EXISTS(SELECT FROM unnest($1::text[]) signature WHERE NOT has_function_privilege(session_user,signature,'EXECUTE')) AND documents.editorial_ready()
+	err := db.QueryRowContext(ctx, `SELECT documents.editorial_ready()
  AND NOT has_function_privilege(session_user,'documents.activate(uuid,bigint,text,uuid[],uuid,uuid,text[])','EXECUTE')
  AND NOT has_function_privilege(session_user,'documents.editorial_record(uuid,uuid,uuid,uuid,text,jsonb)','EXECUTE')
  AND NOT has_function_privilege(session_user,'audit.append(uuid,text,uuid,text,uuid,uuid)','EXECUTE')
- FROM pg_roles r WHERE r.rolname=session_user`, pq.Array(requiredSignatures)).Scan(&allowed)
+ `).Scan(&allowed)
 	if err != nil || !allowed {
 		return nil, errors.New("editorial database privileges not isolated")
 	}
