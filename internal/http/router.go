@@ -11,6 +11,7 @@ import (
 
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 
 	"strconv"
@@ -165,12 +166,16 @@ type upsertProfileReq struct {
 func (s *Server) upsertProfile(c *gin.Context) {
 	principal := platform.Principal(c)
 	var body upsertProfileReq
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16384)
 	if err := c.BindJSON(&body); err != nil {
 		c.JSON(400, gin.H{"error": "invalid_body"})
 		return
 	}
 	if strings.TrimSpace(body.Nombre) == "" || strings.TrimSpace(body.Correo) == "" || strings.TrimSpace(body.FechaNacimiento) == "" || strings.TrimSpace(body.Telefono) == "" || strings.TrimSpace(body.Pais) == "" || strings.TrimSpace(body.Region) == "" || strings.TrimSpace(body.Ciudad) == "" {
 		c.JSON(400, gin.H{"error": "missing_required"})
+		return
+	}
+	if rejectPublicContact(c, publicText{"nombre", body.Nombre}, publicText{"intereses", strings.Join(body.Intereses, " ")}) {
 		return
 	}
 	// parse fecha
@@ -288,6 +293,9 @@ func (s *Server) publishCompa(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	if _, ok := lockedPublicProfile(c, ctx, tx, p.Subject); !ok {
+		return
+	}
 	err = tx.QueryRowContext(ctx, `INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora)
  SELECT gen_random_uuid(),id,$2,$3 FROM usuario WHERE keycloak_id=$1
  ON CONFLICT(usuario_id) DO UPDATE SET descripcion=EXCLUDED.descripcion,tarifa_hora=EXCLUDED.tarifa_hora RETURNING id::text`, p.Subject, body.Descripcion, body.Tarifa).Scan(&id)
