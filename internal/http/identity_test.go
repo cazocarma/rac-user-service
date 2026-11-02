@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	platformidentity "github.com/cazocarma/rac-platform/identity"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/identity"
 	"github.com/cazocarma/rac-user-service/internal/identity/fake"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/gin-gonic/gin"
 )
 
 func identityServer(t *testing.T, service *identity.Service) *Server {
@@ -85,5 +88,66 @@ func TestIdentityRequestsAreValidatedBeforeStorage(t *testing.T) {
 		if w.Code != test.want {
 			t.Errorf("%s=%d %s", name, w.Code, w.Body)
 		}
+	}
+}
+
+type gateFunc func(platformidentity.Query) (platformidentity.Observation, error)
+
+func (f gateFunc) ReadIdentity(_ context.Context, q platformidentity.Query) (platformidentity.Observation, error) {
+	return f(q)
+}
+
+func TestPublicationRequiresApprovedIdentity(t *testing.T) {
+	const subject = "6f1c3f6e-4a35-4c86-9c3b-0f6b0e1c2d3e"
+	approved := false
+	seen := []platformidentity.Query{}
+	s := New(nil, config.Config{})
+	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
+		// A verified email and the compa role never stand in for identity.
+		p := &platform.Claims{Subject: subject, EmailVerified: true}
+		p.RealmAccess.Roles = []string{"cliente", "compa"}
+		return p, nil
+	}}
+	s.identityGate = gateFunc(func(q platformidentity.Query) (platformidentity.Observation, error) {
+		seen = append(seen, q)
+		return platformidentity.Observation{Query: q, Approved: approved, ObservedAt: time.Now()}, nil
+	})
+	send := func(r http.Handler, method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer x")
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+	// The gate alone, ending in a handler that needs no database.
+	gate := gin.New()
+	gate.POST("/gated", s.security.Require("cliente"), s.requireIdentity(platformidentity.CompaOnboarding), func(c *gin.Context) { c.Status(204) })
+	if w := send(gate, "POST", "/gated"); w.Code != 204 || len(seen) != 0 {
+		t.Fatal("gate active or identity read without rollout", w.Code, len(seen))
+	}
+	t.Setenv("IDENTITY_ENFORCEMENT_ENABLED", "true")
+	// Every publication route stops at the gate before its handler runs.
+	r := s.Router()
+	for _, route := range []struct{ method, path string }{
+		{"PUT", "/api/user/me/compa"}, {"POST", "/api/user/compas"}, {"POST", "/api/user/compas/" + subject + "/skills"},
+	} {
+		w := send(r, route.method, route.path)
+		if w.Code != 428 || !strings.Contains(w.Body.String(), `"error":"IDENTITY_VERIFICATION_REQUIRED"`) ||
+			!strings.Contains(w.Body.String(), `"flow":"/identity?purpose=compa_onboarding"`) || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("unverified publication", route.path, w.Code, w.Body)
+		}
+	}
+	for _, q := range seen {
+		if q.AccountID != subject || q.Purpose != platformidentity.CompaOnboarding {
+			t.Fatal("identity query not bound to the authenticated subject", q)
+		}
+	}
+	approved = true
+	if w := send(gate, "POST", "/gated"); w.Code != 204 {
+		t.Fatal("approved identity blocked", w.Code, w.Body)
+	}
+	s.SetIdentity(nil)
+	if w := send(s.Router(), "POST", "/api/user/compas"); w.Code != 503 || !strings.Contains(w.Body.String(), "identity_unavailable") {
+		t.Fatal("missing provider must fail closed", w.Code, w.Body)
 	}
 }

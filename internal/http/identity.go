@@ -13,7 +13,13 @@ import (
 
 // SetIdentity configures identity verification before Router is called; nil
 // keeps the endpoints unavailable rather than inventing a result.
-func (s *Server) SetIdentity(service *identity.Service) { s.identity = service }
+func (s *Server) SetIdentity(service *identity.Service) {
+	s.identity, s.identityGate = service, nil
+	// A nil *Service must not become a non-nil gate interface.
+	if service != nil {
+		s.identityGate = service
+	}
+}
 
 func identityContext(c *gin.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.Request.Context(), 10*time.Second)

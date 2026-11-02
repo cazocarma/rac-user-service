@@ -15,6 +15,10 @@ import (
 // real provider remains DECISION_REQUIRED (D05); only the DEV fake exists.
 func IdentityFromEnvironment(db *sql.DB) (*identity.Service, error) {
 	name := os.Getenv("IDENTITY_PROVIDER")
+	// Enforcing without a provider would block publication with no way to verify.
+	if os.Getenv("IDENTITY_ENFORCEMENT_ENABLED") == "true" && name == "" {
+		return nil, errors.New("identity enforcement requires a provider")
+	}
 	if name == "" {
 		return nil, nil
 	}

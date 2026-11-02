@@ -121,16 +121,16 @@ func (fixtureDocumentSource) ReadDocuments(_ context.Context, q documents.Query)
 
 func TestStandingAuthorityRolloutConfiguration(t *testing.T) {
 	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "false")
-	if server, err := StandingAuthorityFromEnvironment(nil); server != nil || err != nil {
+	if server, err := StandingAuthorityFromEnvironment(nil, nil); server != nil || err != nil {
 		t.Fatal("disabled rollout started listener")
 	}
 	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "typo")
-	if server, err := StandingAuthorityFromEnvironment(nil); server != nil || err == nil {
+	if server, err := StandingAuthorityFromEnvironment(nil, nil); server != nil || err == nil {
 		t.Fatal("invalid rollout enabled listener")
 	}
 	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
 	t.Setenv("STANDING_SUBJECTS_FILE", filepath.Join(t.TempDir(), "missing"))
-	if _, err := StandingAuthorityFromEnvironment(nil); err == nil {
+	if _, err := StandingAuthorityFromEnvironment(nil, nil); err == nil {
 		t.Fatal("missing bindings accepted")
 	}
 	file := filepath.Join(t.TempDir(), "subjects.json")
@@ -141,7 +141,7 @@ func TestStandingAuthorityRolloutConfiguration(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", "https://issuer.example/realms/rac")
 	t.Setenv("STANDING_JWKS_URL", "https://issuer.example/realms/rac/certs")
 	t.Setenv("RAC_ENV", "qa")
-	server, err := StandingAuthorityFromEnvironment(nil)
+	server, err := StandingAuthorityFromEnvironment(nil, nil)
 	if err != nil || server == nil || server.Addr != ":8082" {
 		t.Fatal("internal server configuration rejected")
 	}

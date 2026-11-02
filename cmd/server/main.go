@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	platformidentity "github.com/cazocarma/rac-platform/identity"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/editorial"
 	httpapi "github.com/cazocarma/rac-user-service/internal/http"
@@ -38,7 +39,15 @@ func main() {
 		log.Fatalf("[user-svc] cannot reach postgres: %v", err)
 	}
 
-	authority, err := platform.StandingAuthorityFromEnvironment(db)
+	identityService, err := platform.IdentityFromEnvironment(db)
+	if err != nil {
+		log.Fatal("invalid identity verification configuration")
+	}
+	var identitySource platformidentity.Source
+	if identityService != nil {
+		identitySource = identityService
+	}
+	authority, err := platform.StandingAuthorityFromEnvironment(db, identitySource)
 	if err != nil {
 		log.Fatal("invalid standing authority configuration")
 	}
@@ -59,10 +68,6 @@ func main() {
 				log.Fatal("editorial listener stopped")
 			}
 		}()
-	}
-	identityService, err := platform.IdentityFromEnvironment(db)
-	if err != nil {
-		log.Fatal("invalid identity verification configuration")
 	}
 	store, err := photostore.FromEnvironment()
 	if err != nil {

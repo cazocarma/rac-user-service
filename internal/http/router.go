@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"github.com/cazocarma/rac-platform/documents"
 	documentsdb "github.com/cazocarma/rac-platform/documents/postgres"
+	platformidentity "github.com/cazocarma/rac-platform/identity"
 	"github.com/cazocarma/rac-platform/standing"
 	standingdb "github.com/cazocarma/rac-platform/standing/postgres"
 
@@ -35,6 +36,7 @@ type Server struct {
 	security        *platform.Security
 	grantCompa      func(context.Context, string) error
 	identity        *identity.Service
+	identityGate    platformidentity.Source
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
@@ -74,8 +76,8 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/compas/:id", s.getCompaByID) // detalle
 
 		// Skills
-		api.GET("/skills", s.listSkills)                                                                                                              // ?q=&limit=
-		api.POST("/compas/:id/skills", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
+		api.GET("/skills", s.listSkills)                                                                                                                                                                   // ?q=&limit=
+		api.POST("/compas/:id/skills", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
 
 		// Profile (requires Authorization Bearer)
 		api.GET("/me", s.security.Require("cliente"), s.me)
@@ -86,8 +88,8 @@ func (s *Server) Router() *gin.Engine {
 		api.DELETE("/me/photo", s.security.Require("cliente"), s.deletePhoto)
 		api.GET("/media/profile/:key", s.publicPhoto)
 		api.GET("/me/compa", s.security.Require("cliente"), s.ownCompa)
-		api.PUT("/me/compa", s.security.Require("cliente"), s.requireDocuments(documents.Compa, standing.PublishListing), s.saveOwnCompa)
-		api.POST("/compas", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.publishCompa)
+		api.PUT("/me/compa", s.security.Require("cliente"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.saveOwnCompa)
+		api.POST("/compas", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.publishCompa)
 		api.POST("/profile", s.security.Require("cliente"), s.upsertProfile)
 	}
 

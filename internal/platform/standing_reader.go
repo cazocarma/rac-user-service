@@ -38,6 +38,15 @@ func NewDocumentsReader(cfg StandingReaderConfig) (func(*http.Request) error, er
 	return newServiceReader(cfg, "documents.read")
 }
 
+// NewIdentityReader requires its own audience and permission: neither a
+// standing nor a document reader token can learn identity verification state.
+func NewIdentityReader(cfg StandingReaderConfig) (func(*http.Request) error, error) {
+	if cfg.Audience != "rac-identity" {
+		return nil, errStandingReader
+	}
+	return newServiceReader(cfg, "identity.read")
+}
+
 func newServiceReader(cfg StandingReaderConfig, permission string) (func(*http.Request) error, error) {
 	validURL := func(raw string) bool {
 		u, err := url.Parse(raw)

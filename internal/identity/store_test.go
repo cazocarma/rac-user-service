@@ -12,7 +12,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	platformidentity "github.com/cazocarma/rac-platform/identity"
 	"github.com/cazocarma/rac-user-service/internal/identity"
 	"github.com/cazocarma/rac-user-service/internal/identity/fake"
 	_ "github.com/lib/pq"
@@ -48,12 +50,17 @@ func TestIdentityVerificationPostgres(t *testing.T) {
 	if err = admin.QueryRow(`SELECT substr(md5(random()::text),1,10)`).Scan(&run); err != nil {
 		t.Fatal(err)
 	}
-	subject := func(name string) string { return "identity-" + run + "-" + name }
+	// Keycloak subjects are UUIDs; the shared authority only accepts those.
+	subjects := map[string]string{}
+	subject := func(name string) string { return subjects[name] }
 	for _, name := range []string{"a", "b", "minor", "unknown-age", "banned", "f", "g"} {
-		if _, err = admin.Exec(`INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,email_verified)
- VALUES(gen_random_uuid(),'Synthetic',$1,'cliente',$2,true)`, subject(name)+"@example.test", subject(name)); err != nil {
+		var created string
+		if err = admin.QueryRow(`INSERT INTO usuario(id,nombre,correo,rol,keycloak_id,email_verified)
+ VALUES(gen_random_uuid(),'Synthetic',$1,'cliente',gen_random_uuid()::text,true) RETURNING keycloak_id`,
+			"identity-"+run+"-"+name+"@example.test").Scan(&created); err != nil {
 			t.Fatal(err)
 		}
+		subjects[name] = created
 	}
 	provider, err := fake.New("test", bytes.Repeat([]byte("w"), 32), "http://localhost")
 	if err != nil {
@@ -84,7 +91,7 @@ func TestIdentityVerificationPostgres(t *testing.T) {
 	if status, err := service.Current(ctx, subject("a")); err != nil || status != identity.None {
 		t.Fatal("verified email produced an identity state", status, err)
 	}
-	if _, _, err := service.Start(ctx, "identity-missing-"+run, identity.ClientBooking); !errors.Is(err, identity.ErrNoProfile) {
+	if _, _, err := service.Start(ctx, "00000000-0000-4000-8000-"+run+"00", identity.ClientBooking); !errors.Is(err, identity.ErrNoProfile) {
 		t.Fatal("start without profile", err)
 	}
 	superseded := start("a")
@@ -165,7 +172,7 @@ func TestIdentityVerificationPostgres(t *testing.T) {
 	// The provider identity key and document data never reach storage.
 	var dump string
 	if err = admin.QueryRow(`SELECT COALESCE(string_agg(row_to_json(v)::text,''),'') FROM identity_verifications v
- JOIN usuario u ON u.id=v.user_id WHERE u.keycloak_id LIKE $1`, "identity-"+run+"-%").Scan(&dump); err != nil {
+ JOIN usuario u ON u.id=v.user_id WHERE u.correo LIKE $1`, "identity-"+run+"-%").Scan(&dump); err != nil {
 		t.Fatal(err)
 	}
 	for _, label := range []string{"a", "minor", "unknown", "banned", "shared"} {
@@ -173,6 +180,21 @@ func TestIdentityVerificationPostgres(t *testing.T) {
 		if strings.Contains(dump, string(key)) || strings.Contains(dump, hex.EncodeToString(key)) {
 			t.Fatal("identity key persisted", label)
 		}
+	}
+
+	// The shared authority reports only approval, for exactly the asked account.
+	for name, want := range map[string]bool{"a": true, "b": false, "minor": false, "unknown-age": false, "banned": false} {
+		q := platformidentity.Query{AccountID: subject(name), Purpose: platformidentity.ClientBooking}
+		o, err := service.ReadIdentity(ctx, q)
+		if err != nil || o.Query != q || o.Approved != want || o.ObservedAt.IsZero() {
+			t.Fatal("authority read", name, o, err)
+		}
+		if err := platformidentity.Check(ctx, service, q, time.Second); (err == nil) != want {
+			t.Fatal("authority check", name, err)
+		}
+	}
+	if _, err := service.ReadIdentity(ctx, platformidentity.Query{AccountID: "identity-a", Purpose: platformidentity.ClientBooking}); err == nil {
+		t.Fatal("non-subject account id accepted")
 	}
 
 	// rac_user records results but cannot erase them, rewrite references or ban.

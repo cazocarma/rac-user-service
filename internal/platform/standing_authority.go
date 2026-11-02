@@ -12,6 +12,8 @@ import (
 
 	documentsdb "github.com/cazocarma/rac-platform/documents/postgres"
 	documentstransport "github.com/cazocarma/rac-platform/documents/transport"
+	platformidentity "github.com/cazocarma/rac-platform/identity"
+	identitytransport "github.com/cazocarma/rac-platform/identity/transport"
 	standingdb "github.com/cazocarma/rac-platform/standing/postgres"
 	"github.com/cazocarma/rac-platform/standing/transport"
 )
@@ -19,7 +21,14 @@ import (
 // StandingAuthorityFromEnvironment builds a separate internal listener. The
 // public router never registers this path. Rollout remains explicit until all
 // commercial writers and reconciliation are covered.
-func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
+func StandingAuthorityFromEnvironment(db *sql.DB, identitySource platformidentity.Source) (*http.Server, error) {
+	identityEnabled := os.Getenv("IDENTITY_ENFORCEMENT_ENABLED")
+	if identityEnabled != "" && identityEnabled != "false" && identityEnabled != "true" {
+		return nil, errors.New("invalid identity rollout configuration")
+	}
+	if identityEnabled == "true" && (os.Getenv("STANDING_ENFORCEMENT_ENABLED") != "true" || identitySource == nil) {
+		return nil, errors.New("identity authority requires standing infrastructure and a provider")
+	}
 	documentsEnabled := os.Getenv("DOCUMENTS_ENFORCEMENT_ENABLED")
 	if documentsEnabled != "" && documentsEnabled != "false" && documentsEnabled != "true" {
 		return nil, errors.New("invalid document rollout configuration")
@@ -94,6 +103,17 @@ func StandingAuthorityFromEnvironment(db *sql.DB) (*http.Server, error) {
 			return nil, err
 		}
 		mux.Handle("/internal/documents", documentstransport.Handler(documentsdb.New(db), documentAuth))
+	}
+	if identityEnabled == "true" {
+		// Only match gates first bookings; chat and alert never learn identity state.
+		identityConfig := readerConfig
+		identityConfig.Audience = "rac-identity"
+		identityConfig.Subjects = map[string]string{"rac-match-standing": subjects["rac-match-standing"]}
+		identityAuth, err := NewIdentityReader(identityConfig)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle("/internal/identity", identitytransport.Handler(identitySource, identityAuth))
 	}
 
 	mux.Handle("/internal/standing/replay", transport.ReplayHandler(standingdb.New(db), replayAuth))

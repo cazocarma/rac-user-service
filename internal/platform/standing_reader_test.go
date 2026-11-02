@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	platformidentity "github.com/cazocarma/rac-platform/identity"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -168,7 +170,7 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	t.Setenv("OIDC_ISSUER", issuer)
 	t.Setenv("STANDING_JWKS_URL", jwks.URL)
 	t.Setenv("RAC_ENV", "dev")
-	server, err := StandingAuthorityFromEnvironment(nil)
+	server, err := StandingAuthorityFromEnvironment(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +185,7 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 	}
 
 	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
-	documentServer, err := StandingAuthorityFromEnvironment(nil)
+	documentServer, err := StandingAuthorityFromEnvironment(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,6 +232,95 @@ func TestStandingReaderSignedTokens(t *testing.T) {
 			}
 		}
 	}
+
+	// Identity has its own audience and only match may read it.
+	t.Setenv("IDENTITY_ENFORCEMENT_ENABLED", "true")
+	identityServer, err := StandingAuthorityFromEnvironment(nil, identitySourceFunc(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityToken := func(azp, subject string) string {
+		c := jwt.MapClaims{"iss": issuer, "aud": "rac-identity", "sub": subject, "azp": azp, "typ": "Bearer", "iat": time.Now().Unix(), "exp": time.Now().Add(300 * time.Second).Unix(), "resource_access": map[string]any{"rac-identity": map[string]any{"roles": []string{"identity.read"}}}}
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, c)
+		token.Header["kid"] = "reader"
+		signed, err := token.SignedString(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return signed
+	}
+	for name, tc := range map[string]struct {
+		token string
+		want  int
+	}{
+		"standing token":       {raw, 401},
+		"document token":       {documentRaw, 401},
+		"match identity":       {identityToken("rac-match-standing", "machine-subject"), 405},
+		"chat identity":        {identityToken("rac-chat-standing", "chat-subject"), 401},
+		"match wrong subject":  {identityToken("rac-match-standing", "chat-subject"), 401},
+		"alert identity token": {identityToken("rac-alert-standing", "alert-subject"), 401},
+	} {
+		r := httptest.NewRequest("GET", "/internal/identity", nil)
+		r.Header.Set("Authorization", "Bearer "+tc.token)
+		w := httptest.NewRecorder()
+		identityServer.Handler.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Fatal("identity listener scope", name, w.Code, tc.want)
+		}
+	}
+	w := httptest.NewRecorder()
+	documentServer.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/internal/identity", nil))
+	if w.Code != 404 {
+		t.Fatal("identity authority mounted without rollout", w.Code)
+	}
+}
+
+type identitySourceFunc func(platformidentity.Query) (platformidentity.Observation, error)
+
+func (f identitySourceFunc) ReadIdentity(_ context.Context, q platformidentity.Query) (platformidentity.Observation, error) {
+	return f(q)
+}
+
+func TestIdentityAuthorityRolloutConfiguration(t *testing.T) {
+	for _, value := range []string{"yes", "TRUE", "1"} {
+		t.Setenv("IDENTITY_ENFORCEMENT_ENABLED", value)
+		if _, err := StandingAuthorityFromEnvironment(nil, identitySourceFunc(nil)); err == nil {
+			t.Fatal("invalid identity rollout accepted", value)
+		}
+	}
+	t.Setenv("IDENTITY_ENFORCEMENT_ENABLED", "true")
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "false")
+	if _, err := StandingAuthorityFromEnvironment(nil, identitySourceFunc(nil)); err == nil {
+		t.Fatal("identity authority without standing accepted")
+	}
+	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
+	if _, err := StandingAuthorityFromEnvironment(nil, nil); err == nil {
+		t.Fatal("identity authority without a provider accepted")
+	}
+	t.Setenv("IDENTITY_PROVIDER", "")
+	if _, err := IdentityFromEnvironment(nil); err == nil {
+		t.Fatal("identity enforcement without a provider accepted")
+	}
+	t.Setenv("IDENTITY_ENFORCEMENT_ENABLED", "false")
+	t.Setenv("IDENTITY_PROVIDER", "real-vendor")
+	if _, err := IdentityFromEnvironment(nil); err == nil {
+		t.Fatal("unsupported provider accepted")
+	}
+	t.Setenv("IDENTITY_PROVIDER", "fake")
+	t.Setenv("RAC_ENV", "prd")
+	dir := t.TempDir()
+	for name, value := range map[string]string{"webhook": strings.Repeat("w", 32), "fingerprint": strings.Repeat("k", 32)} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("IDENTITY_WEBHOOK_SECRET_FILE", filepath.Join(dir, "webhook"))
+	t.Setenv("IDENTITY_FINGERPRINT_KEY_FILE", filepath.Join(dir, "fingerprint"))
+	t.Setenv("IDENTITY_FINGERPRINT_KEY_ID", "k1")
+	t.Setenv("IDENTITY_FAKE_BASE_URL", "http://localhost")
+	if _, err := IdentityFromEnvironment(nil); err == nil {
+		t.Fatal("fake provider accepted outside dev/test")
+	}
 }
 
 func TestStandingReaderConfiguration(t *testing.T) {
@@ -250,13 +341,13 @@ func TestStandingReaderConfiguration(t *testing.T) {
 func TestDocumentAuthorityRolloutConfiguration(t *testing.T) {
 	for _, value := range []string{"yes", "TRUE", "1"} {
 		t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", value)
-		if _, err := StandingAuthorityFromEnvironment(nil); err == nil {
+		if _, err := StandingAuthorityFromEnvironment(nil, nil); err == nil {
 			t.Fatal("invalid document rollout accepted")
 		}
 	}
 	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
 	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "false")
-	if _, err := StandingAuthorityFromEnvironment(nil); err == nil {
+	if _, err := StandingAuthorityFromEnvironment(nil, nil); err == nil {
 		t.Fatal("document authority without standing accepted")
 	}
 }
