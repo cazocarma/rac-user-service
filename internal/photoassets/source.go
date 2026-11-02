@@ -128,24 +128,35 @@ type Verified struct{ source Source }
 // or an S3 ETag is not sufficient to confirm an upload. Source metadata and
 // object keys are immutable; Confirm rechecks ownership inside its transaction.
 func Verify(ctx context.Context, reader Reader, source Source) (Verified, error) {
-	if err := ctx.Err(); err != nil {
+	if _, err := readVerified(ctx, reader, source); err != nil {
 		return Verified{}, err
 	}
+	return Verified{source: source}, nil
+}
+
+func readVerified(ctx context.Context, reader Reader, source Source) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if reader == nil || source.id == "" || source.key == "" || source.size < 1 {
-		return Verified{}, ErrInvalid
+		return nil, ErrInvalid
 	}
 	raw, err := reader.Get(ctx, source.key)
 	if err := ctx.Err(); err != nil {
-		return Verified{}, err
+		return nil, err
 	}
 	if err != nil {
-		return Verified{}, ErrStorage
+		return nil, ErrStorage
 	}
+	raw = slices.Clone(raw)
 	actual := sha256.Sum256(raw)
 	if len(raw) != source.size || !bytes.Equal(actual[:], source.digest[:]) {
-		return Verified{}, ErrIntegrity
+		return nil, ErrIntegrity
 	}
-	return Verified{source: source}, nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // Confirm atomically stores verification and one analysis intent. It may be

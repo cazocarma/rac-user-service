@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cazocarma/rac-platform/contentsignals"
+	"github.com/cazocarma/rac-user-service/internal/contentproof"
 )
 
 const PayloadVersion = "rac-listing-payload/1"
@@ -188,20 +189,13 @@ func (p *Preparer) Prepare(ctx context.Context, draft Draft) (Submission, error)
 			return Submission{}, ErrAnalysis
 		}
 		analyzerVersion, lexiconVersion = result.AnalyzerVersion, result.PolicyVersion
+		result, err = contentproof.Freeze(field.text, result, maxAssessmentBytes-analysisBytes)
+		if err != nil {
+			return Submission{}, ErrAnalysis
+		}
 		for _, signal := range result.Signals {
 			if signal.Category == contentsignals.CategoryContact {
 				return Submission{}, ContactError{Field: field.field}
-			}
-			if math.IsNaN(signal.Score) || math.IsInf(signal.Score, 0) || signal.Score <= 0 || signal.Score > 1 {
-				return Submission{}, ErrAnalysis
-			}
-			if signal.RuleID == "" || len(signal.Spans) == 0 {
-				return Submission{}, ErrAnalysis
-			}
-			for _, span := range signal.Spans {
-				if span.Start < 0 || span.End <= span.Start || span.End > len(field.text) || !utf8.ValidString(field.text[span.Start:span.End]) {
-					return Submission{}, ErrAnalysis
-				}
 			}
 		}
 		for _, score := range result.Scores() {
@@ -214,11 +208,7 @@ func (p *Preparer) Prepare(ctx context.Context, draft Draft) (Submission, error)
 		if err != nil || analysisBytes > maxAssessmentBytes {
 			return Submission{}, ErrAnalysis
 		}
-		var frozen contentsignals.Result
-		if json.Unmarshal(encoded, &frozen) != nil {
-			return Submission{}, ErrAnalysis
-		}
-		assessment.Fields = append(assessment.Fields, fieldAssessment{Field: field.field, Result: frozen})
+		assessment.Fields = append(assessment.Fields, fieldAssessment{Field: field.field, Result: result})
 	}
 	if ctx.Err() != nil {
 		return Submission{}, ErrAnalysis
