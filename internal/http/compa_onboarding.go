@@ -7,6 +7,7 @@ import (
 	"github.com/cazocarma/rac-platform/documents"
 	"github.com/cazocarma/rac-platform/standing"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 	"github.com/gin-gonic/gin"
 	"io"
 	"math"
@@ -19,11 +20,11 @@ import (
 )
 
 type compaProfile struct {
-	TimeZone     string              `json:"zona_horaria"`
-	Description  string              `json:"descripcion"`
-	Rate         float64             `json:"tarifa_hora"`
-	Skills       []string            `json:"habilidades"`
-	Availability map[string][]string `json:"availability"`
+	TimeZone     string               `json:"zona_horaria"`
+	Description  string               `json:"descripcion"`
+	Rate         float64              `json:"tarifa_hora"`
+	Activities   []repo.ActivityInput `json:"actividades"`
+	Availability map[string][]string  `json:"availability"`
 }
 
 func (p *compaProfile) validate() error {
@@ -39,23 +40,6 @@ func (p *compaProfile) validate() error {
 	if utf8.RuneCountInString(p.Description) < 20 || utf8.RuneCountInString(p.Description) > 1500 || math.IsNaN(p.Rate) || math.IsInf(p.Rate, 0) || p.Rate < 0 || p.Rate > 99999999.99 || math.Abs(p.Rate*100-math.Round(p.Rate*100)) > 0.00001 {
 		return errors.New("invalid_profile")
 	}
-	if len(p.Skills) < 1 || len(p.Skills) > 8 {
-		return errors.New("invalid_skills")
-	}
-	seen := map[string]bool{}
-	clean := []string{}
-	for _, skill := range p.Skills {
-		skill = strings.ToLower(strings.TrimSpace(skill))
-		if utf8.RuneCountInString(skill) < 2 || utf8.RuneCountInString(skill) > 40 || strings.ContainsAny(skill, "\n\r\t") {
-			return errors.New("invalid_skills")
-		}
-		if !seen[skill] {
-			clean = append(clean, skill)
-			seen[skill] = true
-		}
-	}
-	sort.Strings(clean)
-	p.Skills = clean
 	days := map[string]bool{"lunes": true, "martes": true, "miercoles": true, "jueves": true, "viernes": true, "sabado": true, "domingo": true}
 	count := 0
 	for day, windows := range p.Availability {
@@ -95,7 +79,7 @@ func (s *Server) ownCompa(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "profile_unavailable"})
 		return
 	}
-	item, err := s.repo.GetCompaByID(c, id)
+	item, err := s.repo.GetCompaByID(c, id, s.catalog, false, false)
 	if err == sql.ErrNoRows {
 		c.JSON(404, gin.H{"error": "not_compa"})
 		return
@@ -133,6 +117,11 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
+	activities, err := repo.NormalizeActivities(body.Activities, s.catalog)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid_activities"})
+		return
+	}
 	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: principal.Subject, Capability: standing.PublishListing})
 	defer cancel()
 	if !ok {
@@ -163,17 +152,13 @@ func (s *Server) saveOwnCompa(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "profile_unavailable"})
 		return
 	}
-	if _, err = tx.ExecContext(ctx, `DELETE FROM compa_perfil_skill WHERE perfil_id=$1`, profileID); err != nil {
-		c.JSON(503, gin.H{"error": "profile_unavailable"})
-		return
-	}
-	for _, skill := range body.Skills {
-		_, err = tx.ExecContext(ctx, `WITH entry AS (INSERT INTO skill(id,name) VALUES(gen_random_uuid(),$2) ON CONFLICT(name) DO UPDATE SET name=EXCLUDED.name RETURNING id)
- INSERT INTO compa_perfil_skill(perfil_id,skill_id) SELECT $1,id FROM entry`, profileID, skill)
-		if err != nil {
-			c.JSON(503, gin.H{"error": "profile_unavailable"})
+	if err = repo.ReplaceActivities(ctx, tx, profileID, activities, s.catalog); err != nil {
+		if errors.Is(err, repo.ErrInvalidActivities) {
+			c.JSON(400, gin.H{"error": "invalid_activities"})
 			return
 		}
+		c.JSON(503, gin.H{"error": "profile_unavailable"})
+		return
 	}
 	raw, _ := json.Marshal(body.Availability)
 	if _, err = tx.ExecContext(ctx, `INSERT INTO compa_availability(compa_id,disponibilidad_json,zona_horaria) VALUES($1,$2::jsonb,COALESCE(NULLIF($3,''),'UTC'))

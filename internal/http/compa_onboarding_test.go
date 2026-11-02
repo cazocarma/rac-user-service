@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -15,12 +16,12 @@ import (
 )
 
 func validCompaProfile() compaProfile {
-	return compaProfile{Description: "Compartamos actividades entretenidas juntos", Rate: 10000, Skills: []string{" Running ", "cine", "running"}, Availability: map[string][]string{"lunes": {"18:00-22:00"}}}
+	return compaProfile{Description: "Compartamos actividades entretenidas juntos", Rate: 10000, Activities: []repo.ActivityInput{{Slug: "cine"}, {Slug: "running", Note: " Por la costanera "}}, Availability: map[string][]string{"lunes": {"18:00-22:00"}}}
 }
 
 func TestCompaProfileValidation(t *testing.T) {
 	profile := validCompaProfile()
-	if err := profile.validate(); err != nil || len(profile.Skills) != 2 || profile.Skills[1] != "running" {
+	if err := profile.validate(); err != nil {
 		t.Fatalf("normalize: %+v %v", profile, err)
 	}
 	for _, change := range []func(*compaProfile){
@@ -29,7 +30,6 @@ func TestCompaProfileValidation(t *testing.T) {
 		func(p *compaProfile) { p.Rate = -1 },
 		func(p *compaProfile) { p.Rate = 1.234 },
 		func(p *compaProfile) { p.Description = "muy breve" },
-		func(p *compaProfile) { p.Skills = []string{} },
 		func(p *compaProfile) { p.Availability = map[string][]string{} },
 		func(p *compaProfile) { p.Availability = map[string][]string{"monday": {"18:00-22:00"}} },
 		func(p *compaProfile) { p.Availability = map[string][]string{"lunes": {"18:00-22:00", "21:00-23:00"}} },
@@ -61,11 +61,10 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 	if err = db.QueryRow(`INSERT INTO usuario(id,nombre,correo,rol,keycloak_id) VALUES(gen_random_uuid(),'Onboarding',$1,'cliente',$2) RETURNING id::text`, sub+"@fixture.test", sub).Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
-	skill := "fixture-" + sub[:24]
 	defer func() {
 		db.Exec(`DELETE FROM compa_availability WHERE compa_id=$1`, userID)
 		db.Exec(`DELETE FROM usuario WHERE id=$1`, userID)
-		db.Exec(`DELETE FROM skill WHERE name=$1`, skill)
+		db.Exec(`DELETE FROM compa_activities WHERE compa_id IN (SELECT id FROM compa_perfil WHERE usuario_id=$1)`, userID)
 	}()
 	// Fixtures and cleanup use the disposable database owner. The HTTP handler
 	// must run with the same limited privileges as backend-user in Compose.
@@ -86,6 +85,8 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 		t.Fatalf("scoped service connection unavailable: %s %v", role, err)
 	}
 	s := New(serviceDB, config.Config{})
+	// The seeded catalog is a D04 proposal, offered only in dev/test.
+	s.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
 	roles := []string{"cliente"}
 	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: sub}
@@ -116,7 +117,6 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 		return w
 	}
 	p := validCompaProfile()
-	p.Skills = []string{skill}
 	raw, _ := json.Marshal(p)
 	send("PUT", strings.TrimSuffix(string(raw), "}")+`,"role":"admin"}`, 400)
 	if calls != 0 {
@@ -136,9 +136,50 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 	send("PUT", string(raw), 200)
 	send("PUT", string(raw), 200)
 	w := send("GET", "", 200)
-	if !strings.Contains(w.Body.String(), skill) {
-		t.Fatal("profile skills not saved")
+	if !strings.Contains(w.Body.String(), `"slug":"cine"`) || !strings.Contains(w.Body.String(), `"nota":"Por la costanera"`) {
+		t.Fatal("profile activities not saved", w.Body.String())
 	}
+	// Only the closed catalog can be offered; a rejected save writes nothing.
+	for name, activities := range map[string]string{
+		"outside catalog": `[{"slug":"masajes"}]`,
+		"over maximum":    `[{"slug":"cine"},{"slug":"teatro"},{"slug":"museos"},{"slug":"running"},{"slug":"trekking"},{"slug":"karaoke"}]`,
+		"long note":       `[{"slug":"cine","nota":"` + strings.Repeat("a", 141) + `"}]`,
+		"free text":       `["asado"]`,
+	} {
+		body := strings.Replace(string(raw), `"actividades":[{"slug":"cine","nota":""},{"slug":"running","nota":" Por la costanera "}]`, `"actividades":`+activities, 1)
+		if body == string(raw) {
+			t.Fatal("fixture payload changed shape")
+		}
+		w := send("PUT", body, 400)
+		if !strings.Contains(w.Body.String(), "invalid_") {
+			t.Fatal(name, w.Body.String())
+		}
+	}
+	var activityCount int
+	db.QueryRow(`SELECT count(*) FROM compa_activities a JOIN compa_perfil cp ON cp.id=a.compa_id WHERE cp.usuario_id=$1`, userID).Scan(&activityCount)
+	if activityCount != 2 {
+		t.Fatal("rejected activities changed stored ones", activityCount)
+	}
+	catalogRequest := httptest.NewRecorder()
+	router.ServeHTTP(catalogRequest, httptest.NewRequest("GET", "/api/user/activities", nil))
+	if catalogRequest.Code != 200 || strings.Count(catalogRequest.Body.String(), `"slug"`) != 12 || !strings.Contains(catalogRequest.Body.String(), `"max_per_compa":5`) {
+		t.Fatal("catalog", catalogRequest.Code, catalogRequest.Body.String())
+	}
+	// Outside dev/test only approved categories are offered: none are yet (D04).
+	s.catalog = repo.CatalogPolicy{MaxPerCompa: 5}
+	strict := s.Router()
+	strictCatalog := httptest.NewRecorder()
+	strict.ServeHTTP(strictCatalog, httptest.NewRequest("GET", "/api/user/activities", nil))
+	if strictCatalog.Code != 200 || strings.Contains(strictCatalog.Body.String(), `"slug"`) {
+		t.Fatal("proposed categories served outside dev", strictCatalog.Body.String())
+	}
+	hidden := httptest.NewRecorder()
+	strict.ServeHTTP(hidden, httptest.NewRequest("GET", "/api/user/compas/"+userID, nil))
+	if hidden.Code != 404 {
+		t.Fatal("profile without offered activities is public", hidden.Code)
+	}
+	s.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
+	router = s.Router()
 	db.QueryRow(`SELECT count(*) FROM compa_perfil WHERE usuario_id=$1`, userID).Scan(&count)
 	if count != 1 {
 		t.Fatal("retry duplicated profile")
@@ -205,7 +246,6 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 	}
 	for _, endpoint := range []struct{ path, body string }{
 		{"/api/user/compas", `{"descripcion":"Legacy bypass attempt","tarifa_hora":1}`},
-		{"/api/user/compas/" + profileID + "/skills", `{"skills":["bypass"]}`},
 	} {
 		req := httptest.NewRequest("POST", endpoint.path, strings.NewReader(endpoint.body))
 		req.Header.Set("Authorization", "Bearer fixture")
@@ -221,9 +261,13 @@ func TestCompaOnboardingTransaction(t *testing.T) {
 	// read their private profile and retained photo through authenticated routes.
 	assertVisible := func(want bool) {
 		t.Helper()
-		cards, err := s.repo.ListCompas(context.Background(), 1, 0, skill, true)
-		if err != nil || (len(cards) == 1) != want {
-			t.Fatal("catalog standing mismatch", len(cards), want, err)
+		cards, err := s.repo.ListCompas(context.Background(), 100, 0, "cine", s.catalog, true)
+		listed := false
+		for _, card := range cards {
+			listed = listed || card.UsuarioID == userID
+		}
+		if err != nil || listed != want {
+			t.Fatal("catalog standing mismatch", listed, want, err)
 		}
 		for _, endpoint := range []string{"/api/user/compas/" + userID, "/api/user/compas/" + userID + "/reviews"} {
 			req := httptest.NewRequest("GET", endpoint, nil)

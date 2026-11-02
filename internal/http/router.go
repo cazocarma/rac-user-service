@@ -11,6 +11,7 @@ import (
 
 	"errors"
 	"fmt"
+	"regexp"
 
 	"strconv"
 	"strings"
@@ -37,10 +38,11 @@ type Server struct {
 	grantCompa      func(context.Context, string) error
 	identity        *identity.Service
 	identityGate    platformidentity.Source
+	catalog         repo.CatalogPolicy
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
-	return &Server{documentsSource: documentsdb.New(db), standingCache: standing.NewLeaseCache(standingdb.New(db)), db: db, repo: repo.New(db), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
+	return &Server{documentsSource: documentsdb.New(db), standingCache: standing.NewLeaseCache(standingdb.New(db)), db: db, repo: repo.New(db), catalog: repo.CatalogFromEnvironment(), cfg: cfg, security: platform.FromEnvironment(), grantCompa: platform.NewCompaProvisioner().Grant}
 }
 
 // SetPhotoStore configures persistence before Router is called.
@@ -69,15 +71,12 @@ func (s *Server) Router() *gin.Engine {
 	api.POST("/identity/webhook", s.identityWebhook)
 	{
 		// Compas
-		api.GET("/compas", s.listCompas) // ?limit=&offset=&skill=
+		api.GET("/compas", s.listCompas) // ?limit=&offset=&categoria=
+		api.GET("/activities", s.listActivities)
 		api.GET("/compas/:id/reviews", s.publicReviews)
 		api.GET("/bookings/:id/review", s.security.Require("cliente"), s.bookingReview)
 		api.POST("/bookings/:id/review", s.security.Require("cliente"), s.requireDocuments(documents.Client, standing.WriteReview), s.saveReview)
 		api.GET("/compas/:id", s.getCompaByID) // detalle
-
-		// Skills
-		api.GET("/skills", s.listSkills)                                                                                                                                                                   // ?q=&limit=
-		api.POST("/compas/:id/skills", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.addSkillsToCompa) // body: {"skills":["asado","karaoke"]}
 
 		// Profile (requires Authorization Bearer)
 		api.GET("/me", s.security.Require("cliente"), s.me)
@@ -100,8 +99,13 @@ func (s *Server) listCompas(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	skill := strings.TrimSpace(c.Query("skill"))
-	res, err := s.repo.ListCompas(c, limit, offset, skill, standingEnabled())
+	category := c.Query("categoria")
+	// Exact catalog slugs only: no free-text search over profiles.
+	if category != "" && !slugQuery.MatchString(category) {
+		c.JSON(400, gin.H{"error": "invalid_category"})
+		return
+	}
+	res, err := s.repo.ListCompas(c, limit, offset, category, s.catalog, standingEnabled())
 	if err != nil {
 		c.JSON(503, gin.H{"error": "catalog_unavailable"})
 		return
@@ -109,96 +113,28 @@ func (s *Server) listCompas(c *gin.Context) {
 	c.JSON(200, res)
 }
 
+var slugQuery = regexp.MustCompile(`^[a-z][a-z0-9_]{1,47}$`)
+
+// listActivities is the public closed catalog; names are i18n keys.
+func (s *Server) listActivities(c *gin.Context) {
+	items, err := s.repo.ListCategories(c.Request.Context(), s.catalog)
+	if err != nil {
+		c.JSON(503, gin.H{"error": "catalog_unavailable"})
+		return
+	}
+	c.JSON(200, gin.H{"items": items, "max_per_compa": s.catalog.MaxPerCompa})
+}
+
 func (s *Server) getCompaByID(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	id := c.Param("id")
-	item, err := s.repo.GetCompaByID(c, id, standingEnabled())
+	item, err := s.repo.GetCompaByID(c, id, s.catalog, true, standingEnabled())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(404, gin.H{"error": "not_found"})
 			return
 		}
 		c.JSON(503, gin.H{"error": "catalog_unavailable"})
-		return
-	}
-	c.JSON(200, item)
-}
-
-func (s *Server) listSkills(c *gin.Context) {
-	q := strings.TrimSpace(c.DefaultQuery("q", ""))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	items, err := s.repo.ListSkills(c, q, limit)
-	if err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	// respuesta simple: array de strings
-	c.JSON(200, items)
-}
-
-type addSkillsReq struct {
-	Skills []string `json:"skills"`
-}
-
-func (s *Server) addSkillsToCompa(c *gin.Context) {
-	p := platform.Principal(c)
-	var owner string
-	if err := s.db.QueryRowContext(c, "SELECT u.keycloak_id FROM compa_perfil cp JOIN usuario u ON u.id=cp.usuario_id WHERE cp.id::text=$1", c.Param("id")).Scan(&owner); err != nil {
-		c.JSON(404, gin.H{"error": "not_found"})
-		return
-	}
-	if !p.HasRole("admin") && owner != p.Subject {
-		c.JSON(403, gin.H{"error": "forbidden"})
-		return
-	}
-	id := c.Param("id")
-	var req addSkillsReq
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "invalid_body"})
-		return
-	}
-	if len(req.Skills) == 0 {
-		c.JSON(400, gin.H{"error": "no_skills"})
-		return
-	}
-	ctx, permit, cancel, ok := s.userPermit(c, standing.Requirement{Subject: p.Subject, Capability: standing.PublishListing}, standing.Requirement{Subject: owner, Capability: standing.PublishListing})
-	defer cancel()
-	if !ok {
-		return
-	}
-	check := func(ctx context.Context, tx *sql.Tx) error {
-		if err := s.lockedDocuments(ctx, tx, p.Subject, documents.Compa, standing.PublishListing); err != nil {
-			return err
-		}
-		if owner != p.Subject {
-			if err := s.lockedDocuments(ctx, tx, owner, documents.Compa, standing.PublishListing); err != nil {
-				if errors.Is(err, documents.ErrRequired) || errors.Is(err, errAssessmentRequired) {
-					return errOwnerPrerequisites
-				}
-				return err
-			}
-		}
-		if permit == nil {
-			return nil
-		}
-		return permit.Check(ctx)
-	}
-	if err := s.repo.AddSkillsToPerfil(ctx, id, req.Skills, check); err != nil {
-		if isDocumentFailure(err) {
-			writeDocumentFailure(c, err)
-			return
-		}
-		if errors.Is(err, standing.ErrDenied) || errors.Is(err, standing.ErrUnavailable) {
-			reviewStandingFailure(c, err)
-			return
-		}
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	// Devuelve el compa actualizado
-	item, err := s.repo.GetCompaByID(c, id)
-	if err != nil {
-		c.JSON(200, gin.H{"ok": true})
 		return
 	}
 	c.JSON(200, item)

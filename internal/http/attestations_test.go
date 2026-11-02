@@ -19,6 +19,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/attestations"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 )
 
 func TestCompaAttestationsPostgres(t *testing.T) {
@@ -51,6 +52,7 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	const buyer = "11111111-1111-4111-8111-000000000101"
 	const other = "11111111-1111-4111-8111-000000000102"
 	s := New(db, config.Config{})
+	s.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
 	s.security = &platform.Security{VerifyToken: func(_ context.Context, token string) (*platform.Claims, error) {
 		subject := buyer
 		if token == "other" {
@@ -206,12 +208,13 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	if err = admin.QueryRow("SELECT id FROM compa_perfil WHERE usuario_id=$1", other).Scan(&otherProfile); err != nil {
 		t.Fatal(err)
 	}
+	// The free-text skills alias, the only staff edit of another profile, is retired.
 	ownerRequest := httptest.NewRequest("POST", "/api/user/compas/"+otherProfile+"/skills", strings.NewReader(`{"skills":["owner-bypass"]}`))
 	ownerRequest.Header.Set("Authorization", "Bearer fixture")
 	ownerResponse := httptest.NewRecorder()
 	router.ServeHTTP(ownerResponse, ownerRequest)
-	if ownerResponse.Code != 409 || !strings.Contains(ownerResponse.Body.String(), "owner_prerequisites_required") {
-		t.Fatal("staff could accept or bypass owner requirements", ownerResponse.Code, ownerResponse.Body.String())
+	if ownerResponse.Code != 404 {
+		t.Fatal("retired skills route still reachable", ownerResponse.Code, ownerResponse.Body.String())
 	}
 	updated := syntheticAssessmentContent()
 	updated.Statements[0].Text = "New synthetic reviewed declaration"
@@ -238,7 +241,6 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	}{
 		{"PUT", "/api/user/me/compa", validCompaProfile()},
 		{"POST", "/api/user/compas", map[string]any{"descripcion": "Changed legacy profile", "tarifa_hora": 100}},
-		{"POST", "/api/user/compas/" + profileID + "/skills", map[string]any{"skills": []string{"quiz-bypass"}}},
 	} {
 		payload, _ := json.Marshal(tc.body)
 		r := httptest.NewRequest(tc.method, tc.path, bytes.NewReader(payload))
@@ -253,8 +255,8 @@ func TestCompaAttestationsPostgres(t *testing.T) {
 	if err = admin.QueryRow("SELECT descripcion FROM compa_perfil WHERE id=$1", profileID).Scan(&description); err != nil || description != "Original synthetic profile" {
 		t.Fatal("stale assessment committed profile", description, err)
 	}
-	if err = admin.QueryRow("SELECT count(*) FROM compa_perfil_skill WHERE perfil_id=$1", profileID).Scan(&count); err != nil || count != 0 {
-		t.Fatal("assessment bypass committed skills", count, err)
+	if err = admin.QueryRow("SELECT count(*) FROM compa_activities WHERE compa_id=$1", profileID).Scan(&count); err != nil || count != 0 {
+		t.Fatal("assessment bypass committed activities", count, err)
 	}
 
 }

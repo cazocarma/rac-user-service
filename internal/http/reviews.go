@@ -142,7 +142,7 @@ func (s *Server) bookingReview(c *gin.Context) {
 }
 func (s *Server) publicReviews(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	compa, err := s.repo.GetCompaByID(c.Request.Context(), c.Param("id"), standingEnabled())
+	compa, err := s.repo.GetCompaByID(c.Request.Context(), c.Param("id"), s.catalog, true, standingEnabled())
 	if err == sql.ErrNoRows {
 		c.Status(404)
 		return

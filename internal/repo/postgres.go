@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/lib/pq"
 )
@@ -81,186 +80,102 @@ ON CONFLICT (keycloak_id) DO UPDATE SET
 }
 
 type CompaCard struct {
-	Biography      string   `json:"biografia"`
-	Interests      []string `json:"intereses"`
-	ID             string   `json:"id"`
-	UsuarioID      string   `json:"usuario_id"`
-	Nombre         string   `json:"nombre"`
-	TarifaHora     float64  `json:"tarifa_hora"`
-	Habilidades    []string `json:"habilidades"`
-	ReviewCount    int      `json:"cantidad_resenas"`
-	RatingPromedio float64  `json:"rating_promedio"`
-	FotoURL        *string  `json:"foto_url,omitempty"`
-	Descripcion    *string  `json:"descripcion,omitempty"`
+	Biography      string     `json:"biografia"`
+	Interests      []string   `json:"intereses"`
+	ID             string     `json:"id"`
+	UsuarioID      string     `json:"usuario_id"`
+	Nombre         string     `json:"nombre"`
+	TarifaHora     float64    `json:"tarifa_hora"`
+	Actividades    []Activity `json:"actividades"`
+	ReviewCount    int        `json:"cantidad_resenas"`
+	RatingPromedio float64    `json:"rating_promedio"`
+	FotoURL        *string    `json:"foto_url,omitempty"`
+	Descripcion    *string    `json:"descripcion,omitempty"`
 }
 
 /*************** COMPAS ****************/
 
-func (r *Repo) ListCompas(ctx context.Context, limit, offset int, skill string, enforceStanding ...bool) ([]CompaCard, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 20
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	q := `
-SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
+const compaColumns = `cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora,
        COALESCE(rv.promedio,0), COALESCE(rv.cantidad,0), CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
 FROM compa_perfil cp
 JOIN usuario u ON u.id = cp.usuario_id
-LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
-WHERE ($1 = '' OR $1 = ANY(cp.habilidades_cache))` + PublicStandingClause(len(enforceStanding) > 0 && enforceStanding[0]) + `
-ORDER BY COALESCE(rv.promedio,0) DESC, cp.tarifa_hora ASC NULLS LAST, cp.id ASC
-LIMIT $2 OFFSET $3`
-	rows, err := r.DB.QueryContext(ctx, q, skill, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true`
 
-	out := make([]CompaCard, 0)
-	for rows.Next() {
-		var c CompaCard
-		var habilidades pq.StringArray
-		var foto, desc sql.NullString
-		if err := rows.Scan(
-			&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-			&c.RatingPromedio, &c.ReviewCount, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
-		); err != nil {
-			return nil, err
-		}
-		c.Habilidades = []string(habilidades)
-		if foto.Valid {
-			c.FotoURL = &foto.String
-		}
-		if desc.Valid {
-			c.Descripcion = &desc.String
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-func (r *Repo) GetCompaByID(ctx context.Context, id string, enforceStanding ...bool) (*CompaCard, error) {
-	q := `
-SELECT cp.id, cp.usuario_id, u.nombre, cp.tarifa_hora, cp.habilidades_cache,
-       COALESCE(rv.promedio,0), COALESCE(rv.cantidad,0), CASE WHEN u.foto_clave IS NOT NULL THEN '/api/user/media/profile/' || u.foto_clave END, cp.descripcion, u.biografia, COALESCE(u.intereses,'{}'::text[])
-FROM compa_perfil cp
-JOIN usuario u ON u.id = cp.usuario_id
-LEFT JOIN LATERAL (SELECT avg(puntuacion)::float8 AS promedio,count(*) AS cantidad FROM reserva_resena WHERE compa_id=cp.usuario_id) rv ON true
-WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1)` + PublicStandingClause(len(enforceStanding) > 0 && enforceStanding[0]) + `
-LIMIT 1`
+func scanCompa(scan func(...any) error) (CompaCard, error) {
 	var c CompaCard
-	var habilidades pq.StringArray
 	var foto, desc sql.NullString
-	if err := r.DB.QueryRowContext(ctx, q, id).Scan(
-		&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora, &habilidades,
-		&c.RatingPromedio, &c.ReviewCount, &foto, &desc, &c.Biography, pq.Array(&c.Interests),
-	); err != nil {
-		return nil, err
-	}
-	c.Habilidades = []string(habilidades)
+	err := scan(&c.ID, &c.UsuarioID, &c.Nombre, &c.TarifaHora,
+		&c.RatingPromedio, &c.ReviewCount, &foto, &desc, &c.Biography, pq.Array(&c.Interests))
 	if foto.Valid {
 		c.FotoURL = &foto.String
 	}
 	if desc.Valid {
 		c.Descripcion = &desc.String
 	}
-	return &c, nil
+	c.Actividades = []Activity{}
+	return c, err
 }
 
-/*************** SKILLS ****************/
-
-// ListSkills lista skills con filtro por prefijo (case-insensitive) y límite.
-func (r *Repo) ListSkills(ctx context.Context, qtext string, limit int) ([]string, error) {
+// ListCompas serves discovery: only compas with an offered activity, filtered
+// by an exact category slug. There is no free-text search over descriptions.
+func (r *Repo) ListCompas(ctx context.Context, limit, offset int, category string, policy CatalogPolicy, enforceStanding bool) ([]CompaCard, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	qtext = strings.TrimSpace(qtext)
-	query := `
-SELECT s.name
-FROM skill s
-WHERE ($1 = '' OR LOWER(s.name) LIKE LOWER($1) || '%')
-ORDER BY s.name ASC
-LIMIT $2`
-	rows, err := r.DB.QueryContext(ctx, query, qtext, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	q := `SELECT ` + compaColumns + `
+WHERE ($1 = '' OR EXISTS (SELECT FROM compa_activities fa JOIN activity_categories c ON c.id=fa.category_id
+ WHERE fa.compa_id=cp.id AND c.slug=$1 AND ` + visible(4) + `))` + offeredClause(4) + PublicStandingClause(enforceStanding) + `
+ORDER BY COALESCE(rv.promedio,0) DESC, cp.tarifa_hora ASC NULLS LAST, cp.id ASC
+LIMIT $2 OFFSET $3`
+	rows, err := r.DB.QueryContext(ctx, q, category, limit, offset, policy.AllowProposed)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
-	out := make([]string, 0)
+	out := make([]CompaCard, 0)
+	ids := []string{}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		c, err := scanCompa(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, name)
+		out = append(out, c)
+		ids = append(ids, c.ID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	activities, err := r.activitiesFor(ctx, ids, policy)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if found := activities[out[i].ID]; found != nil {
+			out[i].Actividades = found
+		}
+	}
+	return out, nil
 }
 
-// AddSkillsToPerfil upsertea skills por nombre y crea las relaciones para un perfil.
-func (r *Repo) AddSkillsToPerfil(ctx context.Context, perfilID string, skills []string, beforeCommit ...func(context.Context, *sql.Tx) error) error {
-	if len(skills) == 0 {
-		return nil
-	}
-	tx, err := r.DB.BeginTx(ctx, nil)
+// GetCompaByID applies the discovery visibility rule when public; the owner's
+// own view (public=false) also shows a profile without offered activities.
+func (r *Repo) GetCompaByID(ctx context.Context, id string, policy CatalogPolicy, public, enforceStanding bool) (*CompaCard, error) {
+	q := `SELECT ` + compaColumns + `
+WHERE (cp.id::text = $1 OR cp.usuario_id::text = $1) AND (NOT $3 OR ` + offeredExists(2) + `)` + PublicStandingClause(enforceStanding) + `
+LIMIT 1`
+	c, err := scanCompa(r.DB.QueryRowContext(ctx, q, id, policy.AllowProposed, public).Scan)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() {
-		_ = tx.Rollback()
-	}()
-
-	// Normaliza: recorta, minúsculas básicas
-	clean := make([]string, 0, len(skills))
-	seen := map[string]struct{}{}
-	for _, s := range skills {
-		s2 := strings.TrimSpace(s)
-		if s2 == "" {
-			continue
-		}
-		s2 = strings.ToLower(s2)
-		if _, ok := seen[s2]; ok {
-			continue
-		}
-		seen[s2] = struct{}{}
-		clean = append(clean, s2)
+	activities, err := r.activitiesFor(ctx, []string{c.ID}, policy)
+	if err != nil {
+		return nil, err
 	}
-	if len(clean) == 0 {
-		return tx.Commit()
+	if found := activities[c.ID]; found != nil {
+		c.Actividades = found
 	}
-
-	// Upsert skills y crear relaciones
-	for _, name := range clean {
-		var skillID string
-		if err := tx.QueryRowContext(ctx, `
-INSERT INTO skill (id, name)
-VALUES (gen_random_uuid(), $1)
-ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-RETURNING id
-`, name).Scan(&skillID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO compa_perfil_skill (perfil_id, skill_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING
-`, perfilID, skillID); err != nil {
-			return err
-		}
-		// Trigger AFTER insert/udpate/delete recalcula habilidades_cache; por si acaso:
-		if _, err := tx.ExecContext(ctx, `SELECT refresh_habilidades_cache($1)`, perfilID); err != nil {
-			return err
-		}
-	}
-	for _, check := range beforeCommit {
-		if check != nil {
-			if err := check(ctx, tx); err != nil {
-				return err
-			}
-		}
-	}
-	return tx.Commit()
+	return &c, nil
 }

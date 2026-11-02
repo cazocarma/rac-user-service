@@ -15,6 +15,7 @@ import (
 
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 )
 
 func TestVerifiedReviews(t *testing.T) {
@@ -35,6 +36,10 @@ func TestVerifiedReviews(t *testing.T) {
 	}
 	defer db.Exec(`DELETE FROM usuario WHERE id IN ($1,$2,$3)`, ids[0], ids[1], ids[2])
 	if _, err = db.Exec(`INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora) VALUES(gen_random_uuid(),$1,'Review provider',1000)`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	// Public profiles need an offered catalog activity (P06).
+	if _, err = db.Exec(`INSERT INTO compa_activities(compa_id,category_id) SELECT cp.id,c.id FROM compa_perfil cp, activity_categories c WHERE cp.usuario_id=$1 AND c.slug='cine'`, ids[1]); err != nil {
 		t.Fatal(err)
 	}
 	var bookings []string
@@ -68,6 +73,7 @@ func TestVerifiedReviews(t *testing.T) {
 	}
 	defer serviceDB.Close()
 	server := New(serviceDB, config.Config{})
+	server.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
 	server.security = &platform.Security{VerifyToken: func(ctx context.Context, token string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: ids[0]}
 		if token == "provider" {

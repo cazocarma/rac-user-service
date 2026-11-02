@@ -21,6 +21,7 @@ import (
 	"github.com/cazocarma/rac-platform/policy"
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 )
 
 type documentSourceFunc func(context.Context, documents.Query) (documents.Observation, error)
@@ -51,7 +52,7 @@ func TestDocumentPreconditionsBeforeWrites(t *testing.T) {
 	for _, tc := range []struct {
 		method, path string
 		count        int
-	}{{"PUT", "/api/user/me/compa", 5}, {"POST", "/api/user/compas", 5}, {"POST", "/api/user/compas/fixture/skills", 5}, {"POST", "/api/user/bookings/fixture/review", 4}} {
+	}{{"PUT", "/api/user/me/compa", 5}, {"POST", "/api/user/compas", 5}, {"POST", "/api/user/bookings/fixture/review", 4}} {
 		request := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
 		request.Header.Set("Authorization", "Bearer fixture")
 		w := httptest.NewRecorder()
@@ -130,6 +131,7 @@ func TestDocumentGuardPostgres(t *testing.T) {
 	t.Setenv("DOCUMENTS_ENFORCEMENT_ENABLED", "true")
 	t.Setenv("STANDING_ENFORCEMENT_ENABLED", "true")
 	s := New(db, config.Config{})
+	s.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
 	s.security = &platform.Security{VerifyToken: func(context.Context, string) (*platform.Claims, error) {
 		p := &platform.Claims{Subject: subject}
 		p.RealmAccess.Roles = []string{"cliente"}

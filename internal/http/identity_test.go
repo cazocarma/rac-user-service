@@ -129,7 +129,7 @@ func TestPublicationRequiresApprovedIdentity(t *testing.T) {
 	// Every publication route stops at the gate before its handler runs.
 	r := s.Router()
 	for _, route := range []struct{ method, path string }{
-		{"PUT", "/api/user/me/compa"}, {"POST", "/api/user/compas"}, {"POST", "/api/user/compas/" + subject + "/skills"},
+		{"PUT", "/api/user/me/compa"}, {"POST", "/api/user/compas"},
 	} {
 		w := send(r, route.method, route.path)
 		if w.Code != 428 || !strings.Contains(w.Body.String(), `"error":"IDENTITY_VERIFICATION_REQUIRED"`) ||

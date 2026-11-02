@@ -19,7 +19,7 @@ func TestPrivateEndpointsRejectAnonymous(t *testing.T) {
 			t.Fatalf("%s %s=%d", method, path, w.Code)
 		}
 	}
-	for _, path := range []string{"/api/user/profile", "/api/user/compas/foreign/skills", "/api/user/compas"} {
+	for _, path := range []string{"/api/user/profile", "/api/user/compas"} {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(`{}`)))
 		if w.Code != 401 {
@@ -35,7 +35,7 @@ func TestBaseCannotPublishOrEditSkills(t *testing.T) {
 		return p, nil
 	}}
 	r := s.Router()
-	for _, path := range []string{"/api/user/compas", "/api/user/compas/id/skills"} {
+	for _, path := range []string{"/api/user/compas"} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
 		req.Header.Set("Authorization", "Bearer token")
 		w := httptest.NewRecorder()

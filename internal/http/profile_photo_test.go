@@ -20,6 +20,7 @@ import (
 
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/platform"
+	"github.com/cazocarma/rac-user-service/internal/repo"
 )
 
 type revokingPhotoStore struct {
@@ -78,6 +79,7 @@ func testProfilePhotos(t *testing.T, useS3 bool) {
 	}
 	defer serviceDB.Close()
 	s := New(serviceDB, config.Config{})
+	s.catalog = repo.CatalogPolicy{AllowProposed: true, MaxPerCompa: 5}
 	s.photoDir = t.TempDir()
 	if useS3 {
 		store, err := photostore.NewS3(os.Getenv("RAC_PHOTO_TEST_S3_ENDPOINT"), "us-east-1", os.Getenv("PROFILE_S3_BUCKET"), os.Getenv("PROFILE_S3_ACCESS_KEY"), os.Getenv("PROFILE_S3_SECRET_KEY"))
@@ -164,6 +166,10 @@ func testProfilePhotos(t *testing.T, useS3 bool) {
 	publicPath := "/api/user/media/profile/" + key
 	request("GET", publicPath, "", "", nil, 404)
 	if _, err = db.Exec(`INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora) VALUES(gen_random_uuid(),$1,'Published',1000)`, id); err != nil {
+		t.Fatal(err)
+	}
+	// Public profiles need an offered catalog activity (P06).
+	if _, err = db.Exec(`INSERT INTO compa_activities(compa_id,category_id) SELECT cp.id,c.id FROM compa_perfil cp, activity_categories c WHERE cp.usuario_id=$1 AND c.slug='cine'`, id); err != nil {
 		t.Fatal(err)
 	}
 	request("GET", publicPath, "", "", nil, 200)
