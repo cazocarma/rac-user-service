@@ -91,6 +91,9 @@ func (s *Server) Router() *gin.Engine {
 		api.PUT("/me/compa", s.security.Require("cliente"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.saveOwnCompa)
 		api.POST("/compas", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.publishCompa)
 		api.POST("/profile", s.security.Require("cliente"), s.upsertProfile)
+		// Review submissions: never publish directly (P08).
+		api.GET("/me/listing", s.security.Require("compa"), s.ownListing)
+		api.POST("/me/listing/submissions", s.security.Require("compa"), s.requireDocuments(documents.Compa, standing.PublishListing), s.requireIdentity(platformidentity.CompaOnboarding), s.submitListing)
 	}
 
 	return r
