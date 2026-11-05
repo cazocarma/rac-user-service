@@ -398,6 +398,10 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 		if endpoint == "" {
 			t.Skip("requires isolated S3 pipeline IAM and native OCR")
 		}
+		t.Setenv("RAC_ENV", "test")
+		t.Setenv("LISTING_POLICY_VERSION", "owner-photo-listing-fixture-1")
+		t.Setenv("LISTING_MIN_PRICE_CLP", "5000")
+		t.Setenv("LISTING_MAX_PRICE_CLP", "50000")
 		f := fresh(2)
 		ingress, err := photostore.NewQuarantineS3(endpoint, "us-east-1", os.Getenv("PHOTO_QUARANTINE_BUCKET"), os.Getenv("PHOTO_INGEST_ACCESS_KEY"), os.Getenv("PHOTO_INGEST_SECRET_KEY"))
 		if err != nil {
@@ -458,6 +462,7 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		ids := map[string]string{}
 		for _, tc := range []struct{ name, state string }{{"contact_border", "correction_required"}, {"benign", "awaiting_review"}} {
 			bytes, err := os.ReadFile("../photoassets/testdata/" + tc.name + ".png")
 			if err != nil {
@@ -466,6 +471,7 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 			key := uuid()
 			receipt := decode(send(f, "POST", "/api/user/me/photo-sources", "own", key, "image/png", bytes), 202)
 			id := receipt["asset_id"].(string)
+			ids[tc.name] = id
 			if receipt["status"] != "queued" {
 				t.Fatal("upload did not enqueue analysis", receipt)
 			}
@@ -477,6 +483,39 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 				t.Fatal("owner sees wrong state or private metadata", status)
 			}
 			decode(send(f, "GET", "/api/user/me/photo-sources/"+id, "other", "", "", nil), 404)
+		}
+		// The owner explicitly selects a prepared photo for a revision. The
+		// listing still remains unpublished; no photo approval/promoter exists.
+		if _, err := db.Exec(`INSERT INTO compa_perfil(id,usuario_id,descripcion,tarifa_hora) SELECT gen_random_uuid(),id,'Synthetic photo listing',12000 FROM usuario WHERE keycloak_id=$1`, f.owner); err != nil {
+			t.Fatal(err)
+		}
+		f.s.security = &platform.Security{VerifyToken: func(_ context.Context, token string) (*platform.Claims, error) {
+			subject := f.owner
+			if token == "other" {
+				subject = f.other
+			}
+			p := &platform.Claims{Subject: subject}
+			p.RealmAccess.Roles = []string{"cliente", "compa"}
+			return p, nil
+		}}
+		f.r = f.s.Router()
+		draft := func(photo string) []byte {
+			body := map[string]any{"expected_version": "0", "listing": map[string]any{"display_name": "Cris A", "biography": "", "interests": []string{}, "description": "Compartamos una tarde de cine y conversación tranquila", "activities": []map[string]string{{"slug": "cine", "note": ""}}, "price_clp_per_hour": 12000, "photo_version": photo, "area_code": ""}}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return encoded
+		}
+		decode(send(f, "POST", "/api/user/me/listing/submissions", "own", "", "application/json", draft(ids["contact_border"])), 409)
+		linked := decode(send(f, "POST", "/api/user/me/listing/submissions", "own", "", "application/json", draft(ids["benign"])), 202)
+		var bound string
+		if err := root.QueryRow(`SELECT asset_id::text FROM photo.listing_references WHERE revision_id=$1`, linked["revision_id"]).Scan(&bound); err != nil || bound != ids["benign"] {
+			t.Fatal("HTTP selection did not bind exact prepared photo", err)
+		}
+		var public bool
+		if err := root.QueryRow(`SELECT state='published' OR published_revision_id IS NOT NULL FROM listings WHERE id=$1`, linked["listing_id"]).Scan(&public); err != nil || public {
+			t.Fatal("photo selection published a listing", err)
 		}
 		if _, err := db.Exec(`SELECT assessment FROM photo.processing_results`); err == nil {
 			t.Fatal("public application can read private assessment tables")
