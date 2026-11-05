@@ -56,8 +56,7 @@ var promotionBucket = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 var promotionRegion = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 
 func newPromotionPreparer(ctx context.Context, db *sql.DB, access *staff.Access, reviewPolicy string, policy promotionPolicy) (*promotionPreparer, error) {
-	if !reviewVersion.MatchString(policy.Listing) || !reviewVersion.MatchString(policy.Pipeline) || !audit.ValidID(policy.Target) ||
-		!promotionBucket.MatchString(policy.Bucket) || !promotionRegion.MatchString(policy.Region) || !reviewDigest.MatchString(policy.LocatorSHA256) {
+	if !policy.valid() {
 		return nil, errors.New("invalid photo promotion policy")
 	}
 	owner, err := newServer(ctx, db, access, reviewPolicy, functionPolicy([]string{readySignature, promotionPrepareSignature}))
@@ -67,13 +66,22 @@ func newPromotionPreparer(ctx context.Context, db *sql.DB, access *staff.Access,
 	return &promotionPreparer{owner: owner, policy: policy}, nil
 }
 
+func (p promotionPolicy) valid() bool {
+	return reviewVersion.MatchString(p.Listing) && reviewVersion.MatchString(p.Pipeline) && audit.ValidID(p.Target) &&
+		promotionBucket.MatchString(p.Bucket) && promotionRegion.MatchString(p.Region) && reviewDigest.MatchString(p.LocatorSHA256)
+}
+
+func validPromotionCommand(revision string, version int64, command approvalCommand) bool {
+	return audit.ValidID(revision) && audit.ValidID(command.EventID) && reviewDigest.MatchString(command.SHA256) &&
+		version >= 0 && version != 9223372036854775807 && command.ExpectedVersion == strconv.FormatInt(version, 10)
+}
+
 // The common transaction boundary verifies the function-only LOGIN and fresh
 // MFA, commits the durable intent/attempt/audit, and releases every lock before
 // returning any storage metadata. No source/destination port is invoked here.
 func (p *promotionPreparer) prepare(ctx context.Context, session staff.Session, revision string, version int64, command approvalCommand) (promotionIntent, error) {
 	var intent promotionIntent
-	if !audit.ValidID(revision) || !audit.ValidID(command.EventID) || !reviewDigest.MatchString(command.SHA256) ||
-		version < 0 || version == 9223372036854775807 || command.ExpectedVersion != strconv.FormatInt(version, 10) {
+	if !validPromotionCommand(revision, version, command) {
 		return intent, errUnavailable
 	}
 	raw, err := p.owner.transaction(ctx, session, staff.ListingsReview,

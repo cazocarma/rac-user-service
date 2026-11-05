@@ -27,6 +27,15 @@ func (s previewFixtureStore) Get(ctx context.Context, key string) ([]byte, error
 	return s.get(ctx, key)
 }
 
+func reviewFixtureJPEG(t *testing.T) []byte {
+	t.Helper()
+	var encoded bytes.Buffer
+	if err := jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 64, 48)), nil); err != nil {
+		t.Fatal(err)
+	}
+	return encoded.Bytes()
+}
+
 // SQL setup proves the preview boundary, not OCR execution (the pipeline lab
 // covers real native OCR and S3). No history trigger is disabled here.
 func testPhotoPreviewPostgres(t *testing.T, root *sql.DB, s *Server, request func(string) *httptest.ResponseRecorder) {
@@ -37,11 +46,7 @@ func testPhotoPreviewPostgres(t *testing.T, root *sql.DB, s *Server, request fun
 			t.Fatal(err)
 		}
 	}
-	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, image.NewRGBA(image.Rect(0, 0, 64, 48)), nil); err != nil {
-		t.Fatal(err)
-	}
-	data := encoded.Bytes()
+	data := reviewFixtureJPEG(t)
 	digest := sha256.Sum256(data)
 	const asset = "bbbbbbbb-0000-4000-8000-000000000001"
 	const attempt = "cccccccc-0000-4000-8000-000000000001"

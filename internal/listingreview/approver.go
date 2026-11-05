@@ -119,29 +119,12 @@ func (a *Approver) decide(parent context.Context, session staff.Session, id stri
 	if err = tx.QueryRowContext(ctx, `SELECT listing_review.approval_context($1,$2,$3,$4)`, command.EventID, id, version, command.SHA256).Scan(&rawContext); err != nil {
 		return nil, err
 	}
-	var approval struct {
-		Replay       *bool           `json:"replay"`
-		OwnerSubject string          `json:"owner_subject"`
-		Requirements json.RawMessage `json:"requirements"`
+	requirements, ownerTx, err := checkedApprovalRequirements(ctx, a.ownerDB, a.prerequisites, a.approval.AllowProposedActivities, rawContext)
+	if err != nil {
+		return nil, err
 	}
-	if json.Unmarshal(rawContext, &approval) != nil || approval.Replay == nil || (!*approval.Replay && approval.OwnerSubject == "") || (*approval.Replay && len(approval.Requirements) == 0) {
-		return nil, errUnavailable
-	}
-	requirements := approval.Requirements
-	if !*approval.Replay {
-		ownerTx, err := a.ownerDB.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, errUnavailable
-		}
+	if ownerTx != nil {
 		defer ownerTx.Rollback()
-		checked, err := a.prerequisites(ctx, ownerTx, approval.OwnerSubject)
-		if err != nil {
-			if errors.Is(err, listings.ErrPrerequisites) {
-				return nil, listings.ErrPrerequisites
-			}
-			return nil, errUnavailable
-		}
-		requirements, _ = json.Marshal(map[string]bool{"documents": checked.Documents, "identity": checked.Identity, "allow_proposed_activities": a.approval.AllowProposedActivities})
 	}
 	var raw []byte
 	if err = tx.QueryRowContext(ctx, `SELECT listing_review.approve($1,$2,$3,$4,$5,$6,$7,$8,$9)`,

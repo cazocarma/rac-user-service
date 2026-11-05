@@ -128,4 +128,5 @@ func TestReaderPostgresHTTP(t *testing.T) {
 	}
 	t.Run("private-photo-preview", func(t *testing.T) { testPhotoPreviewPostgres(t, root, s, request) })
 	t.Run("durable-photo-promotion-intent", func(t *testing.T) { testPromotionPreparationPostgres(t, root, dsn) })
+	t.Run("photo-finalization", func(t *testing.T) { testPhotoFinalizationPostgres(t, root, dsn) })
 }
