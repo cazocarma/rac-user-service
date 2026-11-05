@@ -35,6 +35,13 @@ func FromEnvironment(ownerDB *sql.DB, prerequisites listings.Prerequisites) (*ht
 	}
 	environment := os.Getenv("RAC_ENV")
 	approval := ApprovalPolicy{ListingPolicy: os.Getenv("LISTING_POLICY_VERSION"), AllowProposedActivities: environment == "dev" || environment == "test"}
+	photoConfig, err := photoApprovalEnvironment(approval)
+	if err != nil {
+		return nil, err
+	}
+	if photoConfig != nil {
+		urls = append(urls, photoConfig.databaseURL)
+	}
 	policy := os.Getenv("LISTING_REVIEW_POLICY_VERSION")
 	var opened []*sql.DB
 	fail := func(err error) (*http.Server, error) {
@@ -74,12 +81,23 @@ func FromEnvironment(ownerDB *sql.DB, prerequisites listings.Prerequisites) (*ht
 	if err != nil {
 		return fail(err)
 	}
-	return &http.Server{Addr: ":8084", Handler: Combined(reader, corrector, approver), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}, nil
+	var photo *photoApprover
+	if photoConfig != nil {
+		photo, err = newPhotoApprover(ctx, opened[3], ownerDB, access, policy, photoConfig.policy, approval.AllowProposedActivities, prerequisites, photoConfig.source, photoConfig.destination)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	return &http.Server{Addr: ":8084", Handler: combinedWithPhoto(reader, corrector, approver, photo), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 45 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}, nil
 }
 
 // Combined routes each private path to the ingress holding that authority.
 // Readiness requires all three; a missing reason catalog leaves it unready.
 func Combined(reader *Server, corrector *Corrector, approver *Approver) http.Handler {
+	return combinedWithPhoto(reader, corrector, approver, nil)
+}
+
+func combinedWithPhoto(reader *Server, corrector *Corrector, approver *Approver, photo *photoApprover) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ready", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -89,13 +107,22 @@ func Combined(reader *Server, corrector *Corrector, approver *Approver) http.Han
 				return
 			}
 		}
+		if photo != nil && !photo.owner.isReady(r.Context()) {
+			problem(w, 503, "listing_review_unavailable")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Write([]byte(`{"status":"ready"}`))
 	})
 	mux.Handle("GET /internal/listings/queue", reader.Handler())
+	mux.Handle("GET /internal/listings/capabilities", reader.Handler())
 	mux.Handle("GET /internal/listings/revisions/{id}", reader.Handler())
 	mux.Handle("GET /internal/listings/revisions/{id}/photo", reader.Handler())
 	mux.Handle("POST /internal/listings/revisions/{id}/decisions", corrector.Handler())
 	mux.Handle("POST /internal/listings/revisions/{id}/approval", approver.Handler())
+	if photo != nil {
+		reader.promotionReady = photo.owner.isReady
+		mux.Handle("POST /internal/listings/revisions/{id}/photo-approval", photo.Handler())
+	}
 	return mux
 }

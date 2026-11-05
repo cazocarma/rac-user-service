@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
@@ -126,10 +128,26 @@ func testPhotoFinalizationPostgres(t *testing.T, root *sql.DB, dsn string) {
 		}
 		return listings.Checked{Documents: true, Identity: false}, nil
 	}
-	access, _ := readerAccess(t)
+	access, token := readerAccess(t)
 	a, err := newPhotoApprover(context.Background(), db, root, access, fixtureID, policy, true, check, source, destination)
 	if err != nil {
 		t.Fatal("isolated photo coordinator refused", err)
+	}
+	if !a.owner.isReady(context.Background()) {
+		t.Fatal("registered promotion policy not ready")
+	}
+	exec(`UPDATE photo.promotion_gates SET enabled=false WHERE policy_version='` + fixtureID + `'`)
+	if a.owner.isReady(context.Background()) {
+		t.Fatal("retired promotion policy remained ready")
+	}
+	if _, err := newPhotoApprover(context.Background(), db, root, access, fixtureID, policy, true, check, source, destination); err == nil {
+		t.Fatal("constructor accepted disabled promotion policy")
+	}
+	exec(`UPDATE photo.promotion_gates SET enabled=true WHERE policy_version='` + fixtureID + `'`)
+	wrong := policy
+	wrong.Bucket = "different-private-media"
+	if _, err := newPhotoApprover(context.Background(), db, root, access, fixtureID, wrong, true, check, source, destination); err == nil {
+		t.Fatal("constructor accepted different physical target")
 	}
 	session := staff.Session{Subject: actor, Permissions: []staff.Permission{staff.ListingsReview}, AuthenticatedAt: time.Now().Add(-30 * time.Second), ExpiresAt: time.Now().Add(3 * time.Minute)}
 	pending := func() (string, int64, approvalCommand) {
@@ -335,6 +353,81 @@ func testPhotoFinalizationPostgres(t *testing.T, root *sql.DB, dsn string) {
 			}
 		})
 	}
+	t.Run("staff-http", func(t *testing.T) {
+		revision, _, command := pending()
+		body, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := "/internal/listings/revisions/" + revision + "/photo-approval"
+		handler := a.Handler()
+		call := func(path string, body []byte, credential string) *httptest.ResponseRecorder {
+			r := httptest.NewRequest("POST", path, bytes.NewReader(body))
+			r.Header.Set("Content-Type", "application/json")
+			if credential != "" {
+				r.Header.Set("Authorization", "Bearer "+credential)
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			return w
+		}
+		before := calls.Load()
+		for _, auth := range []string{"", token("support", staff.ListingsAudience, actor), token("ts_agent", staff.AdminAudience, actor)} {
+			w := call(path, body, auth)
+			if w.Code != 401 && w.Code != 403 {
+				t.Fatal("private HTTP authorization bypass", w.Code)
+			}
+		}
+		auth := token("ts_agent", staff.ListingsAudience, actor)
+		for _, invalid := range []string{`{"event_id":"invalid"}`, string(body[:len(body)-1]) + `,"actor":"forged"}`} {
+			if w := call(path, []byte(invalid), auth); w.Code != 400 {
+				t.Fatal("asserted HTTP authority accepted", w.Code)
+			}
+		}
+		if calls.Load() != before {
+			t.Fatal("unauthorized request read/wrote storage")
+		}
+		w := call(path, body, auth)
+		if w.Code != 200 || !validPhotoApprovalResult(w.Body.Bytes(), revision, command.EventID) || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("verified JWT HTTP approval failed", w.Code, w.Body.String())
+		}
+		published := state()
+		copied := calls.Load()
+		prior := call(path, body, auth)
+		if prior.Code != 200 || !bytes.Equal(prior.Body.Bytes(), w.Body.Bytes()) || state() != published || calls.Load() != copied {
+			t.Fatal("HTTP finalized replay copied or duplicated effects", prior.Code)
+		}
+		readerURL := *u
+		readerURL.User = url.UserPassword("rac_listing_reader_fixture", "synthetic-reader-only-123456")
+		readerDB, err := sql.Open("postgres", readerURL.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer readerDB.Close()
+		capabilities, err := New(context.Background(), readerDB, access, fixtureID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		get := func() *httptest.ResponseRecorder {
+			r := httptest.NewRequest("GET", "/internal/listings/capabilities", nil)
+			r.Header.Set("Authorization", "Bearer "+auth)
+			w := httptest.NewRecorder()
+			capabilities.Handler().ServeHTTP(w, r)
+			return w
+		}
+		if w := get(); w.Code != 200 || w.Body.String() != "{\"photo_approval_enabled\":false}\n" {
+			t.Fatal("capability enabled without configured coordinator", w.Code, w.Body.String())
+		}
+		capabilities.promotionReady = a.owner.isReady
+		if w := get(); w.Code != 200 || w.Body.String() != "{\"photo_approval_enabled\":true}\n" {
+			t.Fatal("ready capability missing", w.Code, w.Body.String())
+		}
+		exec(`UPDATE photo.promotion_gates SET enabled=false WHERE policy_version='` + fixtureID + `'`)
+		if w := get(); w.Code != 200 || w.Body.String() != "{\"photo_approval_enabled\":false}\n" {
+			t.Fatal("capability stayed enabled after policy retirement", w.Code, w.Body.String())
+		}
+		exec(`UPDATE photo.promotion_gates SET enabled=true WHERE policy_version='` + fixtureID + `'`)
+	})
 }
 
 func joinPhotoSignatures() string { return strings.Join(photoApprovalSignatures, ",") }

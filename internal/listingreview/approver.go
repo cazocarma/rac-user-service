@@ -66,21 +66,29 @@ type approvalCommand struct {
 	SHA256          string `json:"sha256"`
 }
 
-func (a *Approver) approve(w http.ResponseWriter, r *http.Request) {
+func readApprovalCommand(w http.ResponseWriter, r *http.Request) (string, int64, approvalCommand, bool) {
 	id := r.PathValue("id")
 	media, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" || len(params) > 1 || (len(params) == 1 && !strings.EqualFold(params["charset"], "utf-8")) || r.URL.RawQuery != "" || r.URL.ForceQuery || !audit.ValidID(id) {
 		problem(w, 400, "invalid_listing_review_command")
-		return
+		return "", 0, approvalCommand{}, false
 	}
 	var command approvalCommand
 	if strictjson.Decode(http.MaxBytesReader(w, r.Body, 4096), &command) != nil || !audit.ValidID(command.EventID) || !decimalVersion.MatchString(command.ExpectedVersion) || !reviewDigest.MatchString(command.SHA256) {
 		problem(w, 400, "invalid_listing_review_command")
-		return
+		return "", 0, approvalCommand{}, false
 	}
 	version, err := strconv.ParseInt(command.ExpectedVersion, 10, 64)
 	if err != nil || version == 9223372036854775807 {
 		problem(w, 400, "invalid_listing_review_command")
+		return "", 0, approvalCommand{}, false
+	}
+	return id, version, command, true
+}
+
+func (a *Approver) approve(w http.ResponseWriter, r *http.Request) {
+	id, version, command, ok := readApprovalCommand(w, r)
+	if !ok {
 		return
 	}
 	session, ok := staff.Principal(r.Context())
@@ -160,6 +168,10 @@ func approvalFailure(w http.ResponseWriter, err error) {
 		return
 	}
 	var pg *pq.Error
+	if errors.As(err, &pg) && pg.Code == "55000" && pg.Message == "listing_photo_authorization_expired" {
+		problem(w, 403, "staff_step_up_required")
+		return
+	}
 	if errors.As(err, &pg) && pg.Code == "55000" && approvalStates[pg.Message] {
 		problem(w, 409, pg.Message)
 		return

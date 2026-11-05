@@ -16,8 +16,9 @@ import (
 
 const promotionResultSignature = "listing_review.photo_promotion_result(audit.reference,audit.reference,audit.reference,audit.reference,bigint,audit.digest,text,text,audit.reference)"
 const promotionFinalizeSignature = "listing_review.finalize_photo_promotion(audit.reference,audit.reference,audit.reference,audit.reference,bigint,audit.digest,text,jsonb,boolean,audit.reference,audit.reference,text,bytea,integer,timestamp with time zone)"
+const promotionReadySignature = "listing_review.photo_promotion_ready(audit.reference,text,text,audit.reference,audit.digest,text,text)"
 
-var photoApprovalSignatures = []string{readySignature, approvalContextSignature, promotionPrepareSignature, promotionResultSignature, promotionFinalizeSignature}
+var photoApprovalSignatures = []string{readySignature, approvalContextSignature, promotionPrepareSignature, promotionResultSignature, promotionFinalizeSignature, promotionReadySignature}
 
 // Internal coordinator; not registered on an ingress until runtime/provisioning
 // and the corresponding staff UI gates are integrated and tested.
@@ -29,6 +30,7 @@ type photoApprover struct {
 	preparer      *promotionPreparer
 	source        PreviewStore
 	destination   promotionDestination
+	slots         chan struct{}
 }
 
 func newPhotoApprover(ctx context.Context, db, ownerDB *sql.DB, access *staff.Access, reviewPolicy string, policy promotionPolicy, allowProposed bool, prerequisites listings.Prerequisites, source PreviewStore, destination promotionDestination) (*photoApprover, error) {
@@ -39,8 +41,13 @@ func newPhotoApprover(ctx context.Context, db, ownerDB *sql.DB, access *staff.Ac
 	if err != nil {
 		return nil, err
 	}
+	owner.readiness = `SELECT listing_review.photo_promotion_ready($1,$2,$3,$4,$5,$6,$7)`
+	owner.readinessArgs = []any{reviewPolicy, policy.Listing, policy.Pipeline, policy.Target, policy.LocatorSHA256, policy.Bucket, policy.Region}
+	if !owner.isReady(ctx) {
+		return nil, errors.New("photo approval policy not ready")
+	}
 	return &photoApprover{owner: owner, ownerDB: ownerDB, prerequisites: prerequisites, allowProposed: allowProposed,
-		preparer: &promotionPreparer{owner: owner, policy: policy}, source: source, destination: destination}, nil
+		preparer: &promotionPreparer{owner: owner, policy: policy}, source: source, destination: destination, slots: make(chan struct{}, 2)}, nil
 }
 
 func (a *photoApprover) result(ctx context.Context, session staff.Session, revision string, version int64, command approvalCommand) ([]byte, error) {

@@ -38,14 +38,16 @@ func functionPolicy(functions []string) staffdb.RolePolicy {
 }
 
 type Server struct {
-	db         *sql.DB
-	access     *staff.Access
-	policy     string
-	now        func() time.Time
-	authority  staffdb.RolePolicy
-	readiness  string
-	photos     PreviewStore
-	photoSlots chan struct{}
+	db             *sql.DB
+	access         *staff.Access
+	policy         string
+	now            func() time.Time
+	authority      staffdb.RolePolicy
+	readiness      string
+	readinessArgs  []any
+	promotionReady func(context.Context) bool
+	photos         PreviewStore
+	photoSlots     chan struct{}
 }
 
 func New(ctx context.Context, db *sql.DB, access *staff.Access, policy string) (*Server, error) {
@@ -72,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /internal/listings/queue", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.queue)))
 	mux.Handle("GET /internal/listings/revisions/{id}", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.revision)))
 	mux.Handle("GET /internal/listings/revisions/{id}/photo", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.photo)))
+	mux.Handle("GET /internal/listings/capabilities", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.capabilities)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)
@@ -88,7 +91,21 @@ func (s *Server) isReady(parent context.Context) bool {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	var ready bool
-	return s.db != nil && staffdb.CheckRole(ctx, s.db, s.authority) == nil && s.db.QueryRowContext(ctx, s.readiness).Scan(&ready) == nil && ready
+	return s.db != nil && staffdb.CheckRole(ctx, s.db, s.authority) == nil && s.db.QueryRowContext(ctx, s.readiness, s.readinessArgs...).Scan(&ready) == nil && ready
+}
+
+func (s *Server) capabilities(w http.ResponseWriter, r *http.Request) {
+	if !noBody(r) || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		problem(w, 400, "invalid_listing_review_query")
+		return
+	}
+	if !s.isReady(r.Context()) {
+		problem(w, 503, "listing_review_unavailable")
+		return
+	}
+	enabled := s.promotionReady != nil && s.promotionReady(r.Context())
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]bool{"photo_approval_enabled": enabled})
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
