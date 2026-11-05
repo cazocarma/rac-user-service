@@ -1,0 +1,23 @@
+FROM golang:1.27.3@sha256:0c050feb47802ae436b9030833694a0b80160d08e3b3049ad30bf7c9e724e09d AS build
+WORKDIR /src
+ENV GOPROXY=off GOSUMDB=off CGO_ENABLED=0
+COPY go.mod go.sum ./
+COPY vendor ./vendor
+COPY internal ./internal
+COPY cmd/photo-worker ./cmd/photo-worker
+RUN go build -mod=vendor -trimpath -o /photo-worker ./cmd/photo-worker
+
+FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      tesseract-ocr=5.5.0-1+b1 \
+      tesseract-ocr-eng=1:4.1.0-2 \
+      tesseract-ocr-spa=1:4.1.0-2 \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /photo-worker /usr/local/bin/photo-worker
+ENV RAC_PHOTO_OCR_BINARY=/usr/bin/tesseract \
+    RAC_PHOTO_OCR_DATA_DIR=/usr/share/tesseract-ocr/5/tessdata \
+    OMP_THREAD_LIMIT=1
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/photo-worker"]
