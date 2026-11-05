@@ -59,6 +59,13 @@ func FromEnvironment(ownerDB *sql.DB, prerequisites listings.Prerequisites) (*ht
 	if err != nil {
 		return fail(err)
 	}
+	preview, err := photoPreviewFromEnvironment()
+	if err != nil {
+		return fail(err)
+	}
+	if preview != nil {
+		reader.SetPhotoPreview(preview)
+	}
 	corrector, err := NewCorrector(ctx, opened[1], access, policy)
 	if err != nil {
 		return fail(err)
@@ -67,7 +74,7 @@ func FromEnvironment(ownerDB *sql.DB, prerequisites listings.Prerequisites) (*ht
 	if err != nil {
 		return fail(err)
 	}
-	return &http.Server{Addr: ":8084", Handler: Combined(reader, corrector, approver), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}, nil
+	return &http.Server{Addr: ":8084", Handler: Combined(reader, corrector, approver), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}, nil
 }
 
 // Combined routes each private path to the ingress holding that authority.

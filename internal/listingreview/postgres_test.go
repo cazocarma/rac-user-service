@@ -21,7 +21,7 @@ func TestReaderPostgresHTTP(t *testing.T) {
 		t.Skip("requires disposable migrated listing reader database")
 	}
 	u, err := url.Parse(dsn)
-	if err != nil || !strings.HasPrefix(u.Hostname(), "rac-migration-test-") || u.Path != "/listing_review_http" {
+	if err != nil || (!strings.HasPrefix(u.Hostname(), "rac-migration-test-") && !strings.HasPrefix(u.Hostname(), "rac-photo-test-")) || u.Path != "/listing_review_http" {
 		t.Fatal("refusing non-disposable reader database")
 	}
 	root, err := sql.Open("postgres", dsn)

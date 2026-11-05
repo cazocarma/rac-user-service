@@ -10,9 +10,13 @@ import (
 	"image"
 	"image/jpeg"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cazocarma/rac-user-service/internal/photostore"
 )
 
 type previewFixtureStore struct {
@@ -181,6 +185,41 @@ func testPhotoPreviewPostgres(t *testing.T, root *sql.DB, s *Server, request fun
 		}
 	}
 	reset()
+	if endpoint := os.Getenv("RAC_PHOTO_PIPELINE_TEST_ENDPOINT"); endpoint != "" {
+		t.Run("rustfs-read-only", func(t *testing.T) {
+			writer, err := photostore.NewS3(endpoint, "us-east-1", os.Getenv("PHOTO_STAGING_BUCKET"), os.Getenv("PHOTO_STAGING_ACCESS_KEY"), os.Getenv("PHOTO_STAGING_SECRET_KEY"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.Put(context.Background(), key, data); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("RAC_ENV", "dev")
+			t.Setenv("RAC_PHOTO_PREVIEW_ENABLED", "true")
+			t.Setenv("RAC_PHOTO_S3_ENDPOINT", endpoint)
+			t.Setenv("RAC_PHOTO_S3_REGION", "us-east-1")
+			t.Setenv("RAC_PHOTO_STAGING_BUCKET", os.Getenv("PHOTO_STAGING_BUCKET"))
+			t.Setenv("RAC_PHOTO_QUARANTINE_BUCKET", os.Getenv("PHOTO_QUARANTINE_BUCKET"))
+			for _, part := range []string{"ACCESS_KEY", "SECRET_KEY"} {
+				path := filepath.Join(t.TempDir(), "synthetic-secret")
+				if err := os.WriteFile(path, []byte(os.Getenv("PHOTO_PREVIEW_"+part)+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("RAC_PHOTO_PREVIEW_"+part+"_FILE", path)
+			}
+			store, err := photoPreviewFromEnvironment()
+			if err != nil || store == nil {
+				t.Fatal("configured preview missing", err)
+			}
+			s.SetPhotoPreview(store)
+			before := count()
+			w := request(path)
+			if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), data) || count() != before+2 {
+				t.Fatal("real RustFS preview failed", w.Code, w.Body.String())
+			}
+		})
+		reset()
+	}
 	var access, audit int
 	if err := root.QueryRow(`SELECT (SELECT count(*) FROM listing_review.access_events),(SELECT count(*) FROM audit.log WHERE chain_id='88888888-8888-4888-8888-888888888888')`).Scan(&access, &audit); err != nil || access != audit {
 		t.Fatal("preview access and chain diverged", access, audit, err)
