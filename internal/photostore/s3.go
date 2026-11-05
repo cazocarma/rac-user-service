@@ -55,41 +55,54 @@ func newS3(endpoint, region, bucket, access, secret string, keyPattern *regexp.R
 	return &S3{client: client, bucket: bucket, keyPattern: keyPattern, mediaType: mediaType}, nil
 }
 func (s *S3) Put(ctx context.Context, key string, data []byte) error {
+	_, err := s.create(ctx, key, data)
+	return err
+}
+
+func (s *S3) create(ctx context.Context, key string, data []byte) (string, error) {
 	if !s.keyPattern.MatchString(key) || len(data) > MaxStoredBytes {
-		return errors.New("invalid photo")
+		return "", errors.New("invalid photo")
 	}
 	// A HEAD-before-PUT check has a race. Let the object store enforce creation
 	// atomically, matching the local driver's O_EXCL contract.
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentType: aws.String(s.mediaType), CacheControl: aws.String("no-store"), IfNoneMatch: aws.String("*")})
+	result, err := s.client.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), Body: bytes.NewReader(data), ContentType: aws.String(s.mediaType), CacheControl: aws.String("no-store"), IfNoneMatch: aws.String("*")})
 	var api smithy.APIError
 	if errors.As(err, &api) {
 		switch api.ErrorCode() {
 		case "PreconditionFailed":
-			return ErrExists
+			return "", ErrExists
 		case "ConditionalRequestConflict":
-			return ErrConflict
+			return "", ErrConflict
 		}
 	}
-	return err
+	if err != nil {
+		return "", err
+	}
+	return aws.ToString(result.VersionId), nil
 }
 func (s *S3) Get(ctx context.Context, key string) ([]byte, error) {
+	raw, _, err := s.read(ctx, key, nil)
+	return raw, err
+}
+
+func (s *S3) read(ctx context.Context, key string, version *string) ([]byte, string, error) {
 	if !s.keyPattern.MatchString(key) {
-		return nil, ErrNotFound
+		return nil, "", ErrNotFound
 	}
-	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key), VersionId: version})
 	if err != nil {
 		var api smithy.APIError
 		if errors.As(err, &api) && (api.ErrorCode() == "NoSuchKey" || api.ErrorCode() == "NotFound") {
-			return nil, ErrNotFound
+			return nil, "", ErrNotFound
 		}
-		return nil, err
+		return nil, "", err
 	}
 	defer result.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(result.Body, MaxStoredBytes+1))
 	if len(raw) > MaxStoredBytes {
-		return nil, errors.New("stored photo exceeds limit")
+		return nil, "", errors.New("stored photo exceeds limit")
 	}
-	return raw, err
+	return raw, aws.ToString(result.VersionId), err
 }
 func (s *S3) Delete(ctx context.Context, key string) error {
 	if !s.keyPattern.MatchString(key) {
