@@ -201,8 +201,8 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 			t.Fatal("upload capabilities mismatch", capabilities)
 		}
 		key := uuid()
-		if w := send(f, "POST", "/api/user/me/photo-sources", "", key, "image/png", raw); w.Code != 401 {
-			t.Fatal("anonymous upload accepted")
+		if w := send(f, "POST", "/api/user/me/photo-sources", "", key, "image/png", raw); w.Code != 401 || w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("anonymous upload accepted or authentication response cacheable")
 		}
 		first := decode(send(f, "POST", "/api/user/me/photo-sources", "own", key, "image/png", raw), 202)
 		id := first["asset_id"].(string)
@@ -374,6 +374,14 @@ func TestPrivatePhotoUploadsPostgresHTTP(t *testing.T) {
 	})
 	t.Run("disabled-and-input-bounds", func(t *testing.T) {
 		f := fresh(2)
+		ambiguous := httptest.NewRequest("POST", "/api/user/me/photo-sources", bytes.NewReader(raw))
+		ambiguous.Header.Set("Authorization", "Bearer own")
+		ambiguous.Header.Set("Content-Type", "image/png")
+		ambiguous.Header.Add("Idempotency-Key", uuid())
+		ambiguous.Header.Add("Idempotency-Key", uuid())
+		ambiguousResponse := httptest.NewRecorder()
+		f.r.ServeHTTP(ambiguousResponse, ambiguous)
+		decode(ambiguousResponse, 400)
 		decode(send(f, "POST", "/api/user/me/photo-sources", "own", "", "image/png", raw), 400)
 		decode(send(f, "POST", "/api/user/me/photo-sources", "own", uuid(), "image/svg+xml", raw), 415)
 		decode(send(f, "POST", "/api/user/me/photo-sources", "own", uuid(), "image/png", []byte("invalid")), 400)

@@ -75,6 +75,8 @@ func FromEnvironment() *Security {
 func Principal(c *gin.Context) *Claims { return c.MustGet("principal").(*Claims) }
 func (s *Security) Require(roles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Authentication failures and denials also belong to the private flow.
+		c.Header("Cache-Control", "no-store")
 		parts := strings.Fields(c.GetHeader("Authorization"))
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			c.AbortWithStatusJSON(401, gin.H{"error": "authentication_required"})
@@ -100,7 +102,6 @@ func (s *Security) Require(roles ...string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(403, gin.H{"error": "forbidden"})
 			return
 		}
-		c.Header("Cache-Control", "no-store")
 		c.Set("principal", claims)
 	}
 }
