@@ -81,11 +81,15 @@ func problem(w http.ResponseWriter, status int, code string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
 
-func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+func (s *Server) isReady(parent context.Context) bool {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	var ready bool
-	if s.db == nil || staffdb.CheckRole(ctx, s.db, s.authority) != nil || s.db.QueryRowContext(ctx, s.readiness).Scan(&ready) != nil || !ready {
+	return s.db != nil && staffdb.CheckRole(ctx, s.db, s.authority) == nil && s.db.QueryRowContext(ctx, s.readiness).Scan(&ready) == nil && ready
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if !s.isReady(r.Context()) {
 		problem(w, 503, "listing_review_unavailable")
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/editorial"
 	httpapi "github.com/cazocarma/rac-user-service/internal/http"
+	"github.com/cazocarma/rac-user-service/internal/listingreview"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	_ "github.com/lib/pq"
@@ -76,6 +77,17 @@ func main() {
 	srv := httpapi.New(db, cfg)
 	srv.SetPhotoStore(store)
 	srv.SetIdentity(identityService)
+	listingReview, err := listingreview.FromEnvironment(db, srv.ListingPrerequisites())
+	if err != nil {
+		log.Fatal("invalid listing review ingress configuration")
+	}
+	if listingReview != nil {
+		go func() {
+			if err := listingReview.ListenAndServe(); err != nil {
+				log.Fatal("listing review listener stopped")
+			}
+		}()
+	}
 	addr := ":" + cfg.Port
 	log.Printf("user service listening on %s", addr)
 	server := &http.Server{Addr: addr, Handler: srv.Router(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
