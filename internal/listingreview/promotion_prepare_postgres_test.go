@@ -33,7 +33,7 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
  INSERT INTO audit.chain_heads(chain_id) VALUES('` + chain + `');
  INSERT INTO audit.writer_principals VALUES('rac_photo_promotion_fixture','feedfeed-1111-4111-8111-111111111111','` + chain + `');
  INSERT INTO photo.media_targets VALUES('` + target + `',decode(repeat('a',64),'hex'),'approved-media-fixture','us-east-1');
- INSERT INTO photo.promotion_policies VALUES('` + fixtureID + `','preview-fixture-1','` + target + `');
+ INSERT INTO photo.promotion_policies VALUES('` + fixtureID + `','fixture-1','preview-fixture-1','` + target + `');
  INSERT INTO photo.promotion_gates(policy_version) VALUES('` + fixtureID + `');`)
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -54,7 +54,7 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
 	if _, err := newPromotionPreparer(context.Background(), root, access, fixtureID, policy); err == nil {
 		t.Fatal("superuser accepted as preparer")
 	}
-	session := staff.Session{Subject: reviewer, Permissions: []staff.Permission{staff.ListingsReview}, AuthenticatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(time.Minute)}
+	session := staff.Session{Subject: reviewer, Permissions: []staff.Permission{staff.ListingsReview}, AuthenticatedAt: time.Now().Add(-time.Minute), ExpiresAt: time.Now().Add(3 * time.Minute)}
 	var hash, versionText string
 	var version int64
 	if err := root.QueryRow(`SELECT encode(r.payload_hash,'hex'),l.version FROM listing_revisions r JOIN listings l ON l.id=r.listing_id WHERE r.id=$1`, revision).Scan(&hash, &version); err != nil {
@@ -193,6 +193,21 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
 	exec(`UPDATE listings SET version=version+1 WHERE id='44444444-4444-4444-8444-444444444444'`)
 	if _, err := p.prepare(context.Background(), session, revision, version, c); err == nil || counts() != before {
 		t.Fatal("stale listing prepared copy", err)
+	}
+	// Matching a replica's configured listing policy is insufficient: the
+	// active immutable promotion registry must authorize that policy too.
+	const newRevision = "aaaaaaaa-0000-4000-8000-000000000009"
+	exec(`INSERT INTO listing_revisions(id,listing_id,revision_no,payload_canonical,assessment,risk_score,policy_version)
+ SELECT '` + newRevision + `',listing_id,3,payload_canonical,'{}',0,'different-2' FROM listing_revisions WHERE id='` + revision + `';
+ UPDATE listings SET pending_revision_id='` + newRevision + `',version=version+1 WHERE id='44444444-4444-4444-8444-444444444444';`)
+	if err := root.QueryRow(`SELECT encode(r.payload_hash,'hex'),l.version FROM listing_revisions r JOIN listings l ON l.id=r.listing_id WHERE r.id=$1`, newRevision).Scan(&hash, &version); err != nil {
+		t.Fatal(err)
+	}
+	versionText = fmt.Sprint(version)
+	altered := *p
+	altered.policy.Listing = "different-2"
+	if _, err := altered.prepare(context.Background(), session, newRevision, version, command()); err == nil || counts() != before {
+		t.Fatal("unregistered listing policy prepared promotion", err)
 	}
 	var published bool
 	if err := root.QueryRow(`SELECT published_revision_id IS NOT NULL OR state<>'unpublished' FROM listings WHERE id='44444444-4444-4444-8444-444444444444'`).Scan(&published); err != nil || published {
