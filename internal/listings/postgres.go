@@ -5,13 +5,15 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/lib/pq"
 	"math"
 )
 
 var (
-	ErrConflict = errors.New("listing_revision_conflict")
-	ErrNotFound = errors.New("listing_not_found")
-	ErrStorage  = errors.New("listing_storage_unavailable")
+	ErrConflict         = errors.New("listing_revision_conflict")
+	ErrNotFound         = errors.New("listing_not_found")
+	ErrStorage          = errors.New("listing_storage_unavailable")
+	ErrPhotoUnavailable = errors.New("listing_photo_unavailable")
 )
 
 type Receipt struct {
@@ -61,6 +63,10 @@ func Submit(ctx context.Context, tx *sql.Tx, subject, compaProfileID string, exp
 	err = tx.QueryRowContext(ctx, `INSERT INTO public.listing_revisions
  (listing_id,revision_no,payload_canonical,assessment,risk_score,policy_version)
  VALUES($1,$2,$3,$4::jsonb,$5,$6) RETURNING id::text,payload_hash`, id, previous+1, string(submission.payload), string(submission.assessment), submission.risk, submission.policyVersion).Scan(&revisionID, &digest)
+	var photoError *pq.Error
+	if errors.As(err, &photoError) && photoError.Code == "P0001" && photoError.Message == "listing_photo_unavailable" {
+		return Receipt{}, ErrPhotoUnavailable
+	}
 	if err != nil || !bytes.Equal(digest, submission.hash[:]) {
 		return Receipt{}, ErrStorage
 	}

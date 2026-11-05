@@ -191,3 +191,18 @@ func (s *Uploads) RequestStatus(ctx context.Context, subject, requestID string) 
 	}
 	return s.Status(ctx, subject, id)
 }
+
+// ReadyReference is a boolean owner/pipeline check for listing submission. It
+// deliberately reveals no private assessment, storage key or detector details.
+// The INSERT trigger independently derives the immutable reference in the same
+// transaction that creates the listing revision.
+func (s *Uploads) ReadyReference(ctx context.Context, tx *sql.Tx, subject, id string) (bool, error) {
+	if tx == nil || subject == "" || !UUID(id) {
+		return false, nil
+	}
+	var ready bool
+	if err := tx.QueryRowContext(ctx, `SELECT photo.owner_ready_reference($1,$2,$3)`, subject, id, s.policy.Pipeline).Scan(&ready); err != nil {
+		return false, ErrStorage
+	}
+	return ready, nil
+}

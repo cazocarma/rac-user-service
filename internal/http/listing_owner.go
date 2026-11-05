@@ -85,8 +85,9 @@ func (s *Server) submitListing(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_listing"})
 		return
 	}
-	// No reviewed photo can be referenced until P09 promotes approved media.
-	if body.Listing.PhotoVersion != "" {
+	// A configured private source may be attached to review. Publication stays
+	// closed until the separate, review-bound media promotion is implemented.
+	if body.Listing.PhotoVersion != "" && s.photoUploads == nil {
 		c.JSON(409, gin.H{"error": "listing_photo_unavailable"})
 		return
 	}
@@ -120,6 +121,17 @@ func (s *Server) submitListing(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
+	if body.Listing.PhotoVersion != "" {
+		ready, checkErr := s.photoUploads.ReadyReference(ctx, tx, principal.Subject, body.Listing.PhotoVersion)
+		if checkErr != nil {
+			c.JSON(503, gin.H{"error": "listing_submission_unavailable"})
+			return
+		}
+		if !ready {
+			c.JSON(409, gin.H{"error": "listing_photo_unavailable"})
+			return
+		}
+	}
 	var profileID string
 	err = tx.QueryRowContext(ctx, `SELECT cp.id::text FROM compa_perfil cp JOIN usuario u ON u.id=cp.usuario_id
  WHERE u.keycloak_id=$1 FOR KEY SHARE OF cp,u`, principal.Subject).Scan(&profileID)
@@ -133,6 +145,9 @@ func (s *Server) submitListing(c *gin.Context) {
 	}
 	receipt, err := listings.Submit(ctx, tx, principal.Subject, profileID, expected, submission)
 	switch {
+	case errors.Is(err, listings.ErrPhotoUnavailable):
+		c.JSON(409, gin.H{"error": "listing_photo_unavailable"})
+		return
 	case errors.Is(err, listings.ErrConflict):
 		c.JSON(409, gin.H{"error": "listing_version_conflict"})
 		return

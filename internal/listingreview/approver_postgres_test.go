@@ -166,7 +166,23 @@ func TestApprovalPostgresHTTP(t *testing.T) {
 	}
 
 	const photo = "aaaaaaaa-0000-4000-8000-000000000001"
-	addPending(photo, `{"activities":[{"note":"","slug":"cine"}],"description":"Private synthetic candidate","photo_version":"photo-1"}`)
+	// A prepared reference is now required even to submit a photo. Seed only
+	// the SQL preparation facts here: this is a closed-approval-gate fixture,
+	// not an OCR/object-store proof (covered by the separate pipeline lab).
+	const asset = "bbbbbbbb-0000-4000-8000-000000000001"
+	const attempt = "cccccccc-0000-4000-8000-000000000001"
+	exec(`INSERT INTO photo.processing_policies VALUES('approval-photo-fixture-1',600,0,3);
+	 INSERT INTO photo.processing_releases VALUES('approval-photo-fixture-1',repeat('c',40),'sha256:'||repeat('d',64));
+	 INSERT INTO photo.sources(id,owner_user_id,object_key,source_sha256,source_size,declared_media_type,source_width,source_height,pipeline_version)
+	 VALUES('` + asset + `','` + owner + `',replace('` + asset + `','-','')||'.raw',decode(repeat('00',32),'hex'),1,'image/png',64,48,'approval-photo-fixture-1');
+	 INSERT INTO photo.upload_confirmations(asset_id,verified_sha256,verified_size) VALUES('` + asset + `',decode(repeat('00',32),'hex'),1);
+	 INSERT INTO photo.analysis_outbox(asset_id) VALUES('` + asset + `');
+	 INSERT INTO photo.processing_attempts(id,asset_id,attempt_no,pipeline_version,commit_sha,image_digest,created_at,expires_at)
+	 VALUES('` + attempt + `','` + asset + `',1,'approval-photo-fixture-1',repeat('c',40),'sha256:'||repeat('d',64),clock_timestamp(),clock_timestamp()+interval '10 minutes');
+	 INSERT INTO photo.processing_results(asset_id,attempt_id,object_key,normalized_sha256,normalized_size,assessment,disposition,risk_score)
+	 VALUES('` + asset + `','` + attempt + `',replace('` + attempt + `','-','')||'.jpg',decode(repeat('00',32),'hex'),1,'{}','needs_review',0);
+	 UPDATE photo.processing_jobs SET attempts=1,active_attempt='` + attempt + `',completed=true WHERE asset_id='` + asset + `';`)
+	addPending(photo, `{"activities":[{"note":"","slug":"cine"}],"description":"Private synthetic candidate","photo_version":"`+asset+`"}`)
 	expect("unapproved photo", photo, command("eeeeeeee-0000-4000-8000-000000000001", photo), credential, 409, "listing_photo_unapproved")
 	unpublished(photo)
 
