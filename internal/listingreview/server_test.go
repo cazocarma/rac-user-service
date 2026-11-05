@@ -22,7 +22,7 @@ const fixtureID = "11111111-1111-4111-8111-111111111111"
 
 func TestReaderNotOnPublicRouter(t *testing.T) {
 	public := httpapi.New(nil, config.Config{}).Router()
-	for _, path := range []string{"/internal/listings/queue", "/internal/listings/revisions/" + fixtureID} {
+	for _, path := range []string{"/internal/listings/queue", "/internal/listings/revisions/" + fixtureID, "/internal/listings/revisions/" + fixtureID + "/photo"} {
 		w := httptest.NewRecorder()
 		public.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 		if w.Code != 404 {
@@ -64,7 +64,7 @@ func readerAccess(t *testing.T) (*staff.Access, func(string, string, ...string) 
 func TestReaderAuthorizationBeforePersistence(t *testing.T) {
 	access, token := readerAccess(t)
 	handler := (&Server{access: access, policy: fixtureID, now: time.Now}).Handler()
-	for _, path := range []string{"/internal/listings/queue", "/internal/listings/revisions/" + fixtureID} {
+	for _, path := range []string{"/internal/listings/queue", "/internal/listings/revisions/" + fixtureID, "/internal/listings/revisions/" + fixtureID + "/photo"} {
 		for _, tc := range []struct {
 			role, audience string
 			want           int
@@ -97,6 +97,8 @@ func TestReaderAuthorizationBeforePersistence(t *testing.T) {
 			"/internal/listings/queue?cursor=", "/internal/listings/queue?cursor=not-json",
 			"/internal/listings/queue?", "/internal/listings/queue?limit=%ZZ",
 			"/internal/listings/revisions/not-a-uuid", "/internal/listings/revisions/" + fixtureID + "?actor=" + fixtureID,
+			"/internal/listings/revisions/not-a-uuid/photo", "/internal/listings/revisions/" + fixtureID + "/photo?actor=" + fixtureID,
+			"/internal/listings/revisions/" + fixtureID + "/photo?",
 		} {
 			req := httptest.NewRequest("GET", path, nil)
 			req.Header.Set("Authorization", "Bearer "+credential)

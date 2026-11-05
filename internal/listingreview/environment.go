@@ -87,6 +87,7 @@ func Combined(reader *Server, corrector *Corrector, approver *Approver) http.Han
 	})
 	mux.Handle("GET /internal/listings/queue", reader.Handler())
 	mux.Handle("GET /internal/listings/revisions/{id}", reader.Handler())
+	mux.Handle("GET /internal/listings/revisions/{id}/photo", reader.Handler())
 	mux.Handle("POST /internal/listings/revisions/{id}/decisions", corrector.Handler())
 	mux.Handle("POST /internal/listings/revisions/{id}/approval", approver.Handler())
 	return mux

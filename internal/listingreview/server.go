@@ -27,7 +27,7 @@ const readySignature = "listing_review.ready()"
 const queueSignature = "listing_review.queue(audit.reference,audit.reference,audit.reference,integer,integer,timestamp with time zone,uuid)"
 const revisionSignature = "listing_review.revision(audit.reference,audit.reference,audit.reference,audit.reference)"
 
-var signatures = []string{readySignature, queueSignature, revisionSignature}
+var signatures = []string{readySignature, queueSignature, revisionSignature, photoSignature}
 
 func rolePolicy() staffdb.RolePolicy {
 	return functionPolicy(signatures)
@@ -38,12 +38,14 @@ func functionPolicy(functions []string) staffdb.RolePolicy {
 }
 
 type Server struct {
-	db        *sql.DB
-	access    *staff.Access
-	policy    string
-	now       func() time.Time
-	authority staffdb.RolePolicy
-	readiness string
+	db         *sql.DB
+	access     *staff.Access
+	policy     string
+	now        func() time.Time
+	authority  staffdb.RolePolicy
+	readiness  string
+	photos     PreviewStore
+	photoSlots chan struct{}
 }
 
 func New(ctx context.Context, db *sql.DB, access *staff.Access, policy string) (*Server, error) {
@@ -69,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ready", s.ready)
 	mux.Handle("GET /internal/listings/queue", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.queue)))
 	mux.Handle("GET /internal/listings/revisions/{id}", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.revision)))
+	mux.Handle("GET /internal/listings/revisions/{id}/photo", s.access.Require(staff.ListingsRead, http.HandlerFunc(s.photo)))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)

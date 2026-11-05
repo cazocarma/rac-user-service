@@ -126,4 +126,5 @@ func TestReaderPostgresHTTP(t *testing.T) {
 	if auditCount != 3 {
 		t.Fatal("access and audit diverged", auditCount)
 	}
+	t.Run("private-photo-preview", func(t *testing.T) { testPhotoPreviewPostgres(t, root, s, request) })
 }
