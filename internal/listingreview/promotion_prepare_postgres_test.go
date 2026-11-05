@@ -2,25 +2,41 @@ package listingreview
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cazocarma/rac-platform/staff"
+	"github.com/cazocarma/rac-user-service/internal/photostore"
 )
 
 // Reuses the prepared, pending photo of the reader fixture. This proves the
-// durable preparation boundary; it does not execute S3 or finalize approval.
+// durable preparation boundary, plus real copy/readback in the isolated S3 lab.
+// Neither branch finalizes approval.
 func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
 	t.Helper()
 	const revision = "aaaaaaaa-0000-4000-8000-000000000001"
 	const target = "dddddddd-1111-4111-8111-111111111111"
 	const reviewer = "77777777-7777-4777-8777-777777777777"
 	const chain = "deaddead-1111-4111-8111-111111111111"
+	bucket, locator := "approved-media-fixture", strings.Repeat("a", 64)
+	endpoint := os.Getenv("RAC_PHOTO_PIPELINE_TEST_ENDPOINT")
+	if endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil || u.Hostname() != "photo-storage-fixture" || os.Getenv("PHOTO_MEDIA_BUCKET") != "rac-photo-approved-fixture" {
+			t.Fatal("refusing non-disposable promotion destination")
+		}
+		bucket = os.Getenv("PHOTO_MEDIA_BUCKET")
+		hash := sha256.Sum256([]byte(strings.TrimRight(endpoint, "/")))
+		locator = hex.EncodeToString(hash[:])
+	}
 	exec := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := root.Exec(statement, args...); err != nil {
@@ -31,9 +47,9 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
  GRANT USAGE ON SCHEMA listing_review,audit TO rac_photo_promotion_fixture;
  GRANT EXECUTE ON FUNCTION listing_review.ready(),` + promotionPrepareSignature + ` TO rac_photo_promotion_fixture;
  INSERT INTO audit.chain_heads(chain_id) VALUES('` + chain + `');
- INSERT INTO audit.writer_principals VALUES('rac_photo_promotion_fixture','feedfeed-1111-4111-8111-111111111111','` + chain + `');
- INSERT INTO photo.media_targets VALUES('` + target + `',decode(repeat('a',64),'hex'),'approved-media-fixture','us-east-1');
- INSERT INTO photo.promotion_policies VALUES('` + fixtureID + `','fixture-1','preview-fixture-1','` + target + `');
+ INSERT INTO audit.writer_principals VALUES('rac_photo_promotion_fixture','feedfeed-1111-4111-8111-111111111111','` + chain + `');`)
+	exec(`INSERT INTO photo.media_targets VALUES($1,decode($2,'hex'),$3,'us-east-1')`, target, locator, bucket)
+	exec(`INSERT INTO photo.promotion_policies VALUES('` + fixtureID + `','fixture-1','preview-fixture-1','` + target + `');
  INSERT INTO photo.promotion_gates(policy_version) VALUES('` + fixtureID + `');`)
 	u, err := url.Parse(dsn)
 	if err != nil {
@@ -46,7 +62,7 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
 	}
 	defer db.Close()
 	access, _ := readerAccess(t)
-	policy := promotionPolicy{Listing: "fixture-1", Pipeline: "preview-fixture-1", Target: target, Bucket: "approved-media-fixture", Region: "us-east-1", LocatorSHA256: strings.Repeat("a", 64)}
+	policy := promotionPolicy{Listing: "fixture-1", Pipeline: "preview-fixture-1", Target: target, Bucket: bucket, Region: "us-east-1", LocatorSHA256: locator}
 	p, err := newPromotionPreparer(context.Background(), db, access, fixtureID, policy)
 	if err != nil {
 		t.Fatal("isolated promotion preparer rejected", err)
@@ -84,12 +100,35 @@ func testPromotionPreparationPostgres(t *testing.T, root *sql.DB, dsn string) {
 	exec(`UPDATE photo.promotion_gates SET enabled=true WHERE policy_version='` + fixtureID + `'`)
 	c := command()
 	first, err := p.prepare(context.Background(), session, revision, version, c)
-	if err != nil || first.Reused == nil || *first.Reused || counts() != "1:1:1:1" {
+	if err != nil || !first.committed || first.Reused == nil || *first.Reused || counts() != "1:1:1:1" {
 		t.Fatal("durable preparation failed", err, counts())
 	}
 	second, err := p.prepare(context.Background(), session, revision, version, c)
 	if err != nil || !*second.Reused || first.ID != second.ID || first.DestinationKey != second.DestinationKey || first.Attempt == second.Attempt || counts() != "1:2:2:2" {
 		t.Fatal("retry did not preserve intent/key with fresh audited attempt", err, counts())
+	}
+	if endpoint != "" {
+		t.Run("rustfs-copy-readback", func(t *testing.T) {
+			source, err := photostore.NewS3Reader(endpoint, "us-east-1", os.Getenv("PHOTO_STAGING_BUCKET"), os.Getenv("PHOTO_PROMOTER_ACCESS_KEY"), os.Getenv("PHOTO_PROMOTER_SECRET_KEY"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination, err := photostore.NewVersionedS3(endpoint, "us-east-1", bucket, os.Getenv("PHOTO_PROMOTER_ACCESS_KEY"), os.Getenv("PHOTO_PROMOTER_SECRET_KEY"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := copyPreparedPhoto(context.Background(), session, first, source, destination, time.Now)
+			if err != nil || !photostore.ValidVersionID(created.version) || created.intent != first.ID || created.attempt != first.Attempt {
+				t.Fatal("durable intent to RustFS copy failed", err)
+			}
+			replayed, err := copyPreparedPhoto(context.Background(), session, second, source, destination, time.Now)
+			if err != nil || replayed.version != created.version || replayed.digest != created.digest || replayed.size != created.size || replayed.attempt != second.Attempt {
+				t.Fatal("prepared retry did not reuse verified exact version", err)
+			}
+			if counts() != "1:2:2:2" {
+				t.Fatal("storage copy mutated SQL preparation history", counts())
+			}
+		})
 	}
 	// Another connection can immediately lock the business row: prepare did not
 	// leak its transaction to the future storage operation.

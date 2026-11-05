@@ -26,6 +26,7 @@ type promotionPreparer struct {
 	policy promotionPolicy
 }
 type promotionIntent struct {
+	committed         bool
 	ID                string    `json:"intent_id"`
 	Attempt           string    `json:"attempt_id"`
 	Reused            *bool     `json:"intent_reused"`
@@ -96,5 +97,6 @@ func (p *promotionPreparer) prepare(ctx context.Context, session staff.Session, 
 	if err := session.Check(staff.ListingsReview, p.owner.now()); err != nil {
 		return promotionIntent{}, err
 	}
+	intent.committed = true
 	return intent, nil
 }

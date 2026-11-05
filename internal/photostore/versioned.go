@@ -67,6 +67,16 @@ func (s *VersionedS3) Current(ctx context.Context, key string) (VersionedObject,
 	return VersionedObject{version: id, data: slices.Clone(data)}, nil
 }
 
+// CurrentVersion is only a recovery hint. Publication must still verify bytes
+// from Version(key,id); callers cannot substitute this lookup for readback.
+func (s *VersionedS3) CurrentVersion(ctx context.Context, key string) (string, error) {
+	object, err := s.Current(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	return object.VersionID(), nil
+}
+
 func (s *VersionedS3) Version(ctx context.Context, key, id string) ([]byte, error) {
 	if !ValidVersionID(id) {
 		return nil, ErrVersionUnavailable
