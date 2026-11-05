@@ -20,6 +20,7 @@ import (
 
 	"github.com/cazocarma/rac-user-service/internal/config"
 	"github.com/cazocarma/rac-user-service/internal/identity"
+	"github.com/cazocarma/rac-user-service/internal/photoassets"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 	"github.com/cazocarma/rac-user-service/internal/platform"
 	"github.com/cazocarma/rac-user-service/internal/repo"
@@ -28,18 +29,20 @@ import (
 )
 
 type Server struct {
-	documentsSource documents.Source
-	standingCache   *standing.LeaseCache
-	photoStore      photostore.Store
-	photoDir        string
-	db              *sql.DB
-	repo            *repo.Repo
-	cfg             config.Config
-	security        *platform.Security
-	grantCompa      func(context.Context, string) error
-	identity        *identity.Service
-	identityGate    platformidentity.Source
-	catalog         repo.CatalogPolicy
+	documentsSource  documents.Source
+	standingCache    *standing.LeaseCache
+	photoStore       photostore.Store
+	photoUploads     *photoassets.Uploads
+	photoUploadSlots chan struct{}
+	photoDir         string
+	db               *sql.DB
+	repo             *repo.Repo
+	cfg              config.Config
+	security         *platform.Security
+	grantCompa       func(context.Context, string) error
+	identity         *identity.Service
+	identityGate     platformidentity.Source
+	catalog          repo.CatalogPolicy
 }
 
 func New(db *sql.DB, cfg config.Config) *Server {
@@ -84,6 +87,11 @@ func (s *Server) Router() *gin.Engine {
 		api.GET("/me/standing", s.security.Require("cliente"), s.ownStanding)
 		api.PUT("/me", s.security.Require("cliente"), s.saveMe)
 		api.GET("/me/photo", s.security.Require("cliente"), s.ownPhoto)
+		api.POST("/me/photo-sources", s.security.Require("cliente"), s.uploadPhotoSource)
+		api.GET("/me/photo-upload-config", s.security.Require("cliente"), s.photoUploadConfig)
+		api.GET("/me/photo-sources/:id", s.security.Require("cliente"), s.ownPhotoSource)
+		api.GET("/me/photo-upload-requests/:id", s.security.Require("cliente"), s.ownPhotoUploadRequest)
+		api.POST("/me/photo-sources/:id/confirm", s.security.Require("cliente"), s.confirmPhotoSource)
 		api.PUT("/me/photo", s.security.Require("cliente"), s.savePhoto)
 		api.DELETE("/me/photo", s.security.Require("cliente"), s.deletePhoto)
 		api.GET("/media/profile/:key", s.publicPhoto)

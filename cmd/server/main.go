@@ -76,6 +76,9 @@ func main() {
 	}
 	srv := httpapi.New(db, cfg)
 	srv.SetPhotoStore(store)
+	if err := srv.ConfigurePrivatePhotoUploadsFromEnvironment(); err != nil {
+		log.Fatal("invalid private photo upload configuration")
+	}
 	srv.SetIdentity(identityService)
 	listingReview, err := listingreview.FromEnvironment(db, srv.ListingPrerequisites())
 	if err != nil {

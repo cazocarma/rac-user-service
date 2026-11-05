@@ -6,38 +6,20 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"io"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/cazocarma/rac-platform/contentsignals"
 	"github.com/cazocarma/rac-user-service/internal/photoassets"
 	"github.com/cazocarma/rac-user-service/internal/photostore"
+	"github.com/cazocarma/rac-user-service/internal/secretfile"
 )
 
 func secret(name string) (string, error) {
-	path := os.Getenv(name + "_FILE")
-	if path == "" {
-		return "", errors.New("missing secret file")
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", errors.New("secret file unavailable")
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 8193))
-	if err != nil || len(raw) > 8192 {
-		return "", errors.New("invalid secret file")
-	}
-	value := strings.TrimRight(string(raw), "\r\n")
-	if value == "" {
-		return "", errors.New("empty secret file")
-	}
-	return value, nil
+	return secretfile.ReadEnvironment(name)
 }
 
 func prepare(ctx context.Context) (*photoassets.Worker, *sql.DB, error) {
