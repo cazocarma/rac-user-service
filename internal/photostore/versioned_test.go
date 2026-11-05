@@ -3,10 +3,14 @@ package photostore
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -130,4 +134,45 @@ func TestVersionedMediaRejectsUnversionedWrongAndOversizeReads(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestVersionedMediaS3Integration(t *testing.T) {
+	endpoint := os.Getenv("RAC_PHOTO_PIPELINE_TEST_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("requires disposable versioned RustFS destination")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Hostname() != "photo-storage-fixture" || os.Getenv("PHOTO_MEDIA_BUCKET") != "rac-photo-approved-fixture" {
+		t.Fatal("refusing non-fixture versioned media target")
+	}
+	store, err := NewVersionedS3(endpoint, "us-east-1", os.Getenv("PHOTO_MEDIA_BUCKET"), os.Getenv("PHOTO_PROMOTER_ACCESS_KEY"), os.Getenv("PHOTO_PROMOTER_SECRET_KEY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		t.Fatal(err)
+	}
+	key := hex.EncodeToString(random[:]) + ".jpg"
+	data := []byte{0xff, 0xd8, 0xff, 0x01}
+	version, err := store.Create(context.Background(), key, data)
+	if err != nil || !ValidVersionID(version) {
+		t.Fatal("provider creation did not return version", err)
+	}
+	read, err := store.Version(context.Background(), key, version)
+	if err != nil || !bytes.Equal(read, data) {
+		t.Fatal("provider exact-version readback failed", err)
+	}
+	if _, err := store.Create(context.Background(), key, []byte("replacement")); !errors.Is(err, ErrExists) {
+		t.Fatal("provider replaced existing media", err)
+	}
+	current, err := store.Current(context.Background(), key)
+	if err != nil || current.VersionID() != version || !bytes.Equal(current.Bytes(), data) {
+		t.Fatal("provider retry recovery lost exact version", err)
+	}
+	if _, err := store.Version(context.Background(), key, "missing-version-fixture"); err == nil {
+		t.Fatal("missing version silently read latest")
+	}
+	// No cleanup/delete authority is held by this adapter. The owning isolated
+	// RustFS container and its tmpfs are removed by the laboratory runner.
 }
