@@ -21,7 +21,7 @@ func (i Input) Validate() error {
 		return errors.New("invalid audit case reference")
 	}
 	switch i.Action {
-	case "evidence.accessed", "standing.changed", "policy.published", "listing.reviewed", "document.drafted", "document.reviewed", "document.published":
+	case "evidence.accessed", "standing.changed", "policy.published", "listing.reviewed", "document.drafted", "document.reviewed", "document.published", "evidence.captured":
 	default:
 		return errors.New("unregistered audit action")
 	}

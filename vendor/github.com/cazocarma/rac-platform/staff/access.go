@@ -31,6 +31,17 @@ const (
 	DocumentsPublish  Permission = "documents.publish"
 	ListingsRead      Permission = "listings.read"
 	ListingsReview    Permission = "listings.review"
+	// Evidence is T&S material: opening it is always audited by the owner and
+	// never granted to support or business roles.
+	EvidenceRead    Permission = "evidence.read"
+	EvidenceCapture Permission = "evidence.capture"
+	// Cases: agents work assigned cases; only leads assign, give the second
+	// approval and decide appeals. The database still enforces conflicts.
+	CasesRead     Permission = "cases.read"
+	CasesAct      Permission = "cases.act"
+	CasesAssign   Permission = "cases.assign"
+	CasesApprove  Permission = "cases.approve"
+	AppealsDecide Permission = "appeals.decide"
 )
 
 var (
@@ -114,7 +125,7 @@ func validate(c claims, now time.Time) (Session, error) {
 		c.IssuedAt <= 0 || c.IssuedAt > timestamp || c.ExpiresAt <= timestamp || c.ExpiresAt <= c.IssuedAt || c.ExpiresAt-c.IssuedAt > int64(MaxAuthenticationAge/time.Second) {
 		return Session{}, ErrUnauthorized
 	}
-	known, legal, moderator := false, false, false
+	known, legal, moderator, lead := false, false, false, false
 	for _, role := range c.Resources[ClientID].Roles {
 		switch role {
 		case "legal":
@@ -122,6 +133,7 @@ func validate(c claims, now time.Time) (Session, error) {
 			known = true
 		case "ts_agent", "ts_lead":
 			moderator = true
+			lead = lead || role == "ts_lead"
 			known = true
 		case "support", "business_admin":
 			known = true
@@ -142,7 +154,13 @@ func validate(c claims, now time.Time) (Session, error) {
 		permissions = append(permissions, DocumentsRead, DocumentsDraft, DocumentsApprove, DocumentsPublish, DocumentsActivate)
 	}
 	if moderator {
-		permissions = append(permissions, ListingsRead, ListingsReview)
+		permissions = append(permissions, ListingsRead, ListingsReview, EvidenceCapture, CasesRead, CasesAct)
+	}
+	if lead {
+		permissions = append(permissions, CasesAssign, CasesApprove, AppealsDecide)
+	}
+	if legal || moderator {
+		permissions = append(permissions, EvidenceRead)
 	}
 	expires := time.Unix(c.ExpiresAt, 0).UTC()
 	stepUpExpiry := time.Unix(c.AuthTime, 0).Add(MaxAuthenticationAge).UTC()
