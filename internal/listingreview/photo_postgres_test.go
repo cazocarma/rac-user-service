@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"image"
 	"image/jpeg"
@@ -18,6 +19,13 @@ import (
 
 	"github.com/cazocarma/rac-user-service/internal/photostore"
 )
+
+// The worker's proof shape, including fields the staff summary must drop.
+const photoAssessmentFixture = `{"analysis":{"AnalyzerVersion":"a1","PolicyVersion":"p1",` +
+	`"Signals":[{"Category":"contact","RuleID":"contact.phone","Score":1,"Spans":[{"Start":0,"End":9}]},` +
+	`{"Category":"<script>","RuleID":"x","Score":1}],"Unevaluated":["weapons"]},"ocr_text":"ocr-secret-text",` +
+	`"pending_checks":["banned_image_similarity","human_review"],"fingerprints":{"v":1},` +
+	`"similarity":{"policy_version":"s1","state":"not_configured","matches":[{"reference_id":"r","case_id":"c","evidence_id":"e","distance":3}]}}`
 
 type previewFixtureStore struct {
 	get func(context.Context, string) ([]byte, error)
@@ -62,11 +70,30 @@ func testPhotoPreviewPostgres(t *testing.T, root *sql.DB, s *Server, request fun
  INSERT INTO photo.processing_attempts(id,asset_id,attempt_no,pipeline_version,commit_sha,image_digest,created_at,expires_at)
  VALUES('` + attempt + `','` + asset + `',1,'preview-fixture-1',repeat('c',40),'sha256:'||repeat('d',64),clock_timestamp(),clock_timestamp()+interval '10 minutes');`)
 	exec(`INSERT INTO photo.processing_results(asset_id,attempt_id,object_key,normalized_sha256,normalized_size,assessment,disposition,risk_score)
- VALUES('`+asset+`','`+attempt+`','`+key+`',decode($1,'hex'),$2,'{}','needs_review',0)`, hex.EncodeToString(digest[:]), len(data))
+ VALUES('`+asset+`','`+attempt+`','`+key+`',decode($1,'hex'),$2,$3,'needs_review',40)`, hex.EncodeToString(digest[:]), len(data), photoAssessmentFixture)
 	exec(`UPDATE photo.processing_jobs SET attempts=1,active_attempt='` + attempt + `',completed=true WHERE asset_id='` + asset + `';
  INSERT INTO listing_revisions(id,listing_id,revision_no,payload_canonical,assessment,risk_score,policy_version)
  VALUES('` + revision + `','44444444-4444-4444-8444-444444444444',2,'{"photo_version":"` + asset + `"}','{}',0,'fixture-1');
  UPDATE listings SET pending_revision_id='` + revision + `',version=version+1 WHERE id='44444444-4444-4444-8444-444444444444';`)
+	w := request("/internal/listings/revisions/" + revision)
+	var detail struct {
+		PhotoReview map[string]any `json:"photo_review"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &detail) != nil {
+		t.Fatal("revision detail unavailable", w.Code)
+	}
+	summary, _ := json.Marshal(detail.PhotoReview)
+	want := `{"disposition":"needs_review","pending_checks":["banned_image_similarity","human_review"],"risk_score":40,` +
+		`"sha256":"` + hex.EncodeToString(digest[:]) + `","signals":[{"category":"contact","rule_id":"contact.phone"}],` +
+		`"similarity":{"match_count":1,"state":"not_configured"},"unevaluated":["weapons"]}`
+	if string(summary) != want {
+		t.Fatalf("photo summary not closed or exact: %s", summary)
+	}
+	for _, leaked := range []string{"ocr-secret-text", "Spans", "case_id", "evidence_id", "fingerprints", key, "<script>"} {
+		if strings.Contains(w.Body.String(), leaked) {
+			t.Fatal("photo summary leaked", leaked)
+		}
+	}
 	count := func() int {
 		var n int
 		if err := root.QueryRow(`SELECT count(*) FROM listing_review.access_events WHERE kind='photo'`).Scan(&n); err != nil {
@@ -85,7 +112,7 @@ func testPhotoPreviewPostgres(t *testing.T, root *sql.DB, s *Server, request fun
 			return bytes.Clone(data), nil
 		}})
 	}
-	w := request(path)
+	w = request(path)
 	if w.Code != 503 || count() != 0 {
 		t.Fatal("missing store fell back to another source", w.Code)
 	}
