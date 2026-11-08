@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -21,6 +22,20 @@ import (
 )
 
 var policyPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// refreshInterval paces the expiry sweep; TS_EFFECTS_REFRESH_SECONDS (5-3600)
+// shortens it for disposable tests.
+func refreshInterval() (time.Duration, error) {
+	raw := os.Getenv("TS_EFFECTS_REFRESH_SECONDS")
+	if raw == "" {
+		return time.Minute, nil
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds < 5 || seconds > 3600 {
+		return 0, errors.New("invalid refresh interval")
+	}
+	return time.Duration(seconds) * time.Second, nil
+}
 
 func prepare(ctx context.Context) (*tseffects.Consumer, *sql.DB, string, error) {
 	if os.Getenv("TS_EFFECTS_ENABLED") != "true" {
@@ -50,7 +65,7 @@ func prepare(ctx context.Context) (*tseffects.Consumer, *sql.DB, string, error) 
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(5 * time.Minute)
-	authority := staffdb.RolePolicy{Functions: []string{"standing.apply_ts_effect(uuid,jsonb,uuid)", "standing.refresh_ts_standing(uuid,uuid,uuid)"}}
+	authority := staffdb.RolePolicy{Functions: tseffects.Functions()}
 	if err := staffdb.CheckRole(ctx, db, authority); err != nil {
 		db.Close()
 		return nil, nil, "", errors.New("consumer database privileges not isolated")
@@ -66,7 +81,24 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
-	log.Print("ts effects consumer started: commits before acknowledging")
+	interval, err := refreshInterval()
+	if err != nil {
+		return err
+	}
+	store, ok := consumer.Store.(tseffects.Postgres)
+	if !ok {
+		return errors.New("unexpected consumer store")
+	}
+	expiries := tseffects.PostgresExpiries{DB: db, Policy: store.Policy}
+	go tseffects.RefreshLoop(ctx, expiries, interval, func(changed int, err error) {
+		// Counts only: never subjects, statuses or driver errors.
+		if err != nil {
+			log.Print("ts effects expiry sweep failed; retrying next pass")
+		} else if changed > 0 {
+			log.Printf("ts effects expiry sweep refreshed %d accounts", changed)
+		}
+	})
+	log.Print("ts effects consumer started: commits before acknowledging, sweeping expiries")
 	failures := 0
 	for ctx.Err() == nil {
 		err := consumer.Session(ctx, broker)
